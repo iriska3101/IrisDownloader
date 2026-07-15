@@ -6,6 +6,7 @@ import re
 import subprocess
 import tempfile
 from contextlib import ExitStack
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -45,10 +46,21 @@ BROWSER_HEADERS = {
 }
 
 
+@dataclass
+class AudioMetadata:
+    title: str = "TikTok audio"
+    performer: str = "Неизвестен"
+    cover_url: str | None = None
+    referer: str | None = None
+
+
 async def start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
+    if update.message is None:
+        return
+
     await update.message.reply_text(
         "Привет! 👋\n\n"
         "Отправь мне ссылку, а затем выбери:\n"
@@ -65,6 +77,22 @@ def find_link(text: str) -> str | None:
         return None
 
     return match.group(0).rstrip(".,)")
+
+
+def clean_text(
+    value: Any,
+    fallback: str,
+    max_length: int = 64,
+) -> str:
+    if not isinstance(value, str):
+        return fallback
+
+    cleaned = re.sub(r"\s+", " ", value).strip()
+
+    if not cleaned:
+        return fallback
+
+    return cleaned[:max_length]
 
 
 def extract_json_objects(page_html: str) -> list[Any]:
@@ -124,6 +152,11 @@ def urls_from_value(value: Any) -> list[str]:
     return found
 
 
+def first_url(value: Any) -> str | None:
+    urls = urls_from_value(value)
+    return urls[0] if urls else None
+
+
 def find_photo_urls(data: Any) -> list[str]:
     found_urls: list[str] = []
 
@@ -145,10 +178,10 @@ def find_photo_urls(data: Any) -> list[str]:
                             or image.get("image_url")
                         )
 
-                        candidates = urls_from_value(image_url)
+                        image_link = first_url(image_url)
 
-                        if candidates:
-                            found_urls.append(candidates[0])
+                        if image_link:
+                            found_urls.append(image_link)
 
             for child in value.values():
                 walk(child)
@@ -162,8 +195,102 @@ def find_photo_urls(data: Any) -> list[str]:
     return list(dict.fromkeys(found_urls))
 
 
-def find_music_urls(data: Any) -> list[str]:
-    found_urls: list[str] = []
+def looks_like_audio_url(url: str) -> bool:
+    lowered = url.lower()
+
+    blocked_words = (
+        "avatar",
+        "image",
+        "cover",
+        "thumbnail",
+        "profile",
+    )
+
+    return not any(word in lowered for word in blocked_words)
+
+
+def extract_music_from_dict(
+    music: dict[str, Any],
+) -> tuple[str | None, str | None, str | None, str | None]:
+    title_keys = (
+        "title",
+        "musicName",
+        "music_name",
+        "songName",
+        "song_name",
+    )
+
+    performer_keys = (
+        "authorName",
+        "author_name",
+        "artist",
+        "artistName",
+        "artist_name",
+        "ownerName",
+        "owner_name",
+    )
+
+    play_keys = (
+        "playUrl",
+        "playURL",
+        "play_url",
+        "playUri",
+        "play_uri",
+        "musicPlayUrl",
+        "music_play_url",
+    )
+
+    cover_keys = (
+        "coverLarge",
+        "cover_large",
+        "coverMedium",
+        "cover_medium",
+        "coverThumb",
+        "cover_thumb",
+        "cover",
+        "albumCover",
+        "album_cover",
+    )
+
+    title: str | None = None
+    performer: str | None = None
+    music_url: str | None = None
+    cover_url: str | None = None
+
+    for key in title_keys:
+        if isinstance(music.get(key), str):
+            title = music[key]
+            break
+
+    for key in performer_keys:
+        if isinstance(music.get(key), str):
+            performer = music[key]
+            break
+
+    for key in play_keys:
+        candidate = first_url(music.get(key))
+
+        if candidate and looks_like_audio_url(candidate):
+            music_url = candidate
+            break
+
+    for key in cover_keys:
+        candidate = first_url(music.get(key))
+
+        if candidate:
+            cover_url = candidate
+            break
+
+    return title, performer, music_url, cover_url
+
+
+def find_music_metadata(
+    data: Any,
+) -> tuple[str | None, str | None, str | None, str | None]:
+    best_title: str | None = None
+    best_performer: str | None = None
+    best_music_url: str | None = None
+    best_cover_url: str | None = None
 
     music_container_names = {
         "music",
@@ -173,59 +300,99 @@ def find_music_urls(data: Any) -> list[str]:
         "music_detail",
     }
 
-    play_url_names = {
-        "playurl",
-        "play_url",
-        "playuri",
-        "play_uri",
-        "playurluri",
-        "play_url_uri",
-        "musicplayurl",
-        "music_play_url",
-    }
-
     def normalise_key(key: str) -> str:
-        return key.replace("-", "_").lower()
+        return (
+            key.replace("-", "")
+            .replace("_", "")
+            .lower()
+        )
 
-    def walk(value: Any, inside_music: bool = False) -> None:
+    def walk(value: Any) -> None:
+        nonlocal best_title
+        nonlocal best_performer
+        nonlocal best_music_url
+        nonlocal best_cover_url
+
         if isinstance(value, dict):
             for key, child in value.items():
                 clean_key = normalise_key(str(key))
-                child_inside_music = (
-                    inside_music
-                    or clean_key in music_container_names
-                )
 
-                if clean_key in play_url_names:
-                    found_urls.extend(urls_from_value(child))
-                    continue
+                if (
+                    clean_key in music_container_names
+                    and isinstance(child, dict)
+                ):
+                    (
+                        title,
+                        performer,
+                        music_url,
+                        cover_url,
+                    ) = extract_music_from_dict(child)
 
-                if child_inside_music and "play" in clean_key:
-                    candidates = urls_from_value(child)
+                    if title and not best_title:
+                        best_title = title
 
-                    for candidate in candidates:
-                        lowered = candidate.lower()
+                    if performer and not best_performer:
+                        best_performer = performer
 
-                        if not any(
-                            blocked in lowered
-                            for blocked in (
-                                "cover",
-                                "avatar",
-                                "image",
-                                "thumbnail",
-                            )
-                        ):
-                            found_urls.append(candidate)
+                    if music_url and not best_music_url:
+                        best_music_url = music_url
 
-                walk(child, child_inside_music)
+                    if cover_url and not best_cover_url:
+                        best_cover_url = cover_url
+
+                walk(child)
 
         elif isinstance(value, list):
             for child in value:
-                walk(child, inside_music)
+                walk(child)
 
     walk(data)
 
-    return list(dict.fromkeys(found_urls))
+    return (
+        best_title,
+        best_performer,
+        best_music_url,
+        best_cover_url,
+    )
+
+
+def find_post_author(data: Any) -> str | None:
+    author_keys = {
+        "uniqueid",
+        "unique_id",
+        "nickname",
+        "username",
+    }
+
+    found: list[str] = []
+
+    def walk(value: Any, inside_author: bool = False) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                clean_key = str(key).replace("-", "_").lower()
+
+                child_inside_author = (
+                    inside_author
+                    or clean_key in {"author", "authorinfo", "author_info"}
+                )
+
+                if (
+                    child_inside_author
+                    and clean_key in author_keys
+                    and isinstance(child, str)
+                    and child.strip()
+                ):
+                    found.append(child.strip())
+
+                walk(child, child_inside_author)
+
+        elif isinstance(value, list):
+            for child in value:
+                walk(child, inside_author)
+
+    walk(data)
+
+    return found[0] if found else None
 
 
 def extract_fallback_photo_urls(page_html: str) -> list[str]:
@@ -256,7 +423,6 @@ def extract_fallback_photo_urls(page_html: str) -> list[str]:
                 "avatar",
                 "profile",
                 "music",
-                "cover",
             )
         )
 
@@ -268,7 +434,7 @@ def extract_fallback_photo_urls(page_html: str) -> list[str]:
 
 def get_tiktok_post_assets(
     url: str,
-) -> tuple[list[str], str | None, str]:
+) -> tuple[list[str], str | None, str, AudioMetadata]:
     with httpx.Client(
         headers=BROWSER_HEADERS,
         follow_redirects=True,
@@ -281,21 +447,120 @@ def get_tiktok_post_assets(
         page_html = response.text
 
     photo_urls: list[str] = []
-    music_urls: list[str] = []
+    music_url: str | None = None
+    title: str | None = None
+    performer: str | None = None
+    cover_url: str | None = None
+    post_author: str | None = None
 
-    for json_object in extract_json_objects(page_html):
+    json_objects = extract_json_objects(page_html)
+
+    for json_object in json_objects:
         photo_urls.extend(find_photo_urls(json_object))
-        music_urls.extend(find_music_urls(json_object))
+
+        (
+            found_title,
+            found_performer,
+            found_music_url,
+            found_cover_url,
+        ) = find_music_metadata(json_object)
+
+        if found_title and not title:
+            title = found_title
+
+        if found_performer and not performer:
+            performer = found_performer
+
+        if found_music_url and not music_url:
+            music_url = found_music_url
+
+        if found_cover_url and not cover_url:
+            cover_url = found_cover_url
+
+        if not post_author:
+            post_author = find_post_author(json_object)
 
     photo_urls = list(dict.fromkeys(photo_urls))
-    music_urls = list(dict.fromkeys(music_urls))
 
     if not photo_urls:
         photo_urls = extract_fallback_photo_urls(page_html)
 
-    music_url = music_urls[0] if music_urls else None
+    if not cover_url and photo_urls:
+        cover_url = photo_urls[0]
 
-    return photo_urls, music_url, final_url
+    if not performer and post_author:
+        performer = (
+            post_author
+            if post_author.startswith("@")
+            else f"@{post_author}"
+        )
+
+    metadata = AudioMetadata(
+        title=clean_text(
+            title,
+            "TikTok audio",
+        ),
+        performer=clean_text(
+            performer,
+            "Неизвестен",
+        ),
+        cover_url=cover_url,
+        referer=final_url,
+    )
+
+    return photo_urls, music_url, final_url, metadata
+
+
+def metadata_from_yt_dlp(
+    info: dict[str, Any],
+) -> AudioMetadata:
+    title = (
+        info.get("track")
+        or info.get("title")
+        or info.get("fulltitle")
+        or "TikTok audio"
+    )
+
+    performer = (
+        info.get("artist")
+        or info.get("creator")
+        or info.get("uploader")
+        or info.get("channel")
+        or info.get("uploader_id")
+        or "Неизвестен"
+    )
+
+    cover_url = info.get("thumbnail")
+
+    if not cover_url:
+        thumbnails = info.get("thumbnails")
+
+        if isinstance(thumbnails, list):
+            for thumbnail in reversed(thumbnails):
+                if not isinstance(thumbnail, dict):
+                    continue
+
+                candidate = thumbnail.get("url")
+
+                if isinstance(candidate, str):
+                    cover_url = candidate
+                    break
+
+    return AudioMetadata(
+        title=clean_text(
+            title,
+            "TikTok audio",
+        ),
+        performer=clean_text(
+            performer,
+            "Неизвестен",
+        ),
+        cover_url=(
+            cover_url
+            if isinstance(cover_url, str)
+            else None
+        ),
+    )
 
 
 def download_video(
@@ -317,7 +582,10 @@ def download_video(
     }
 
     with yt_dlp.YoutubeDL(options) as downloader:
-        info = downloader.extract_info(url, download=True)
+        info = downloader.extract_info(
+            url,
+            download=True,
+        )
         downloaded_path = downloader.prepare_filename(info)
 
     path = Path(downloaded_path)
@@ -341,7 +609,7 @@ def download_video(
 def download_audio_source(
     url: str,
     folder: str,
-) -> Path:
+) -> tuple[Path, AudioMetadata]:
     output_template = os.path.join(
         folder,
         "source-%(id)s.%(ext)s",
@@ -357,18 +625,23 @@ def download_audio_source(
     }
 
     with yt_dlp.YoutubeDL(options) as downloader:
-        info = downloader.extract_info(url, download=True)
+        info = downloader.extract_info(
+            url,
+            download=True,
+        )
         downloaded_path = downloader.prepare_filename(info)
 
+    metadata = metadata_from_yt_dlp(info)
     path = Path(downloaded_path)
 
     if path.exists():
-        return path
+        return path, metadata
 
     candidates = [
         file
         for file in Path(folder).iterdir()
-        if file.is_file() and file.suffix.lower() != ".mp3"
+        if file.is_file()
+        and file.suffix.lower() != ".mp3"
     ]
 
     if not candidates:
@@ -376,10 +649,12 @@ def download_audio_source(
             "Исходная аудиодорожка не найдена"
         )
 
-    return max(
+    path = max(
         candidates,
         key=lambda item: item.stat().st_size,
     )
+
+    return path, metadata
 
 
 def download_direct_music(
@@ -425,25 +700,138 @@ def download_direct_music(
     return source_path
 
 
+def download_thumbnail(
+    metadata: AudioMetadata,
+    folder: str,
+) -> Path | None:
+    if not metadata.cover_url:
+        return None
+
+    headers = dict(BROWSER_HEADERS)
+
+    if metadata.referer:
+        headers["Referer"] = metadata.referer
+
+    raw_cover = Path(folder) / "cover_source"
+
+    try:
+        with httpx.Client(
+            headers=headers,
+            follow_redirects=True,
+            timeout=30,
+        ) as client:
+            response = client.get(metadata.cover_url)
+            response.raise_for_status()
+
+        if len(response.content) < 5_000:
+            return None
+
+        raw_cover.write_bytes(response.content)
+
+    except httpx.HTTPError:
+        return None
+
+    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    thumbnail_path = Path(folder) / "cover.jpg"
+
+    quality_values = (5, 9, 13, 17, 21, 25)
+
+    for quality in quality_values:
+        command = [
+            ffmpeg_exe,
+            "-y",
+            "-i",
+            str(raw_cover),
+            "-vf",
+            (
+                "scale=320:320:"
+                "force_original_aspect_ratio=decrease,"
+                "pad=320:320:(ow-iw)/2:(oh-ih)/2"
+            ),
+            "-frames:v",
+            "1",
+            "-q:v",
+            str(quality),
+            str(thumbnail_path),
+        ]
+
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=90,
+            check=False,
+        )
+
+        if (
+            result.returncode == 0
+            and thumbnail_path.exists()
+            and thumbnail_path.stat().st_size <= 190_000
+        ):
+            return thumbnail_path
+
+    return None
+
+
 def convert_to_mp3(
     source_path: Path,
     folder: str,
+    metadata: AudioMetadata,
+    cover_path: Path | None,
 ) -> Path:
     output_path = Path(folder) / "IrisDownloader_audio.mp3"
     ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
 
-    command = [
+    base_command = [
         ffmpeg_exe,
         "-y",
         "-i",
         str(source_path),
-        "-vn",
-        "-codec:a",
-        "libmp3lame",
-        "-b:a",
-        "192k",
-        str(output_path),
     ]
+
+    if cover_path:
+        command = [
+            *base_command,
+            "-i",
+            str(cover_path),
+            "-map",
+            "0:a:0",
+            "-map",
+            "1:v:0",
+            "-codec:a",
+            "libmp3lame",
+            "-b:a",
+            "192k",
+            "-codec:v",
+            "mjpeg",
+            "-id3v2_version",
+            "3",
+            "-metadata:s:v",
+            "title=Album cover",
+            "-metadata:s:v",
+            "comment=Cover (front)",
+            "-metadata",
+            f"title={metadata.title}",
+            "-metadata",
+            f"artist={metadata.performer}",
+            str(output_path),
+        ]
+    else:
+        command = [
+            *base_command,
+            "-vn",
+            "-codec:a",
+            "libmp3lame",
+            "-b:a",
+            "192k",
+            "-id3v2_version",
+            "3",
+            "-metadata",
+            f"title={metadata.title}",
+            "-metadata",
+            f"artist={metadata.performer}",
+            str(output_path),
+        ]
 
     result = subprocess.run(
         command,
@@ -453,10 +841,45 @@ def convert_to_mp3(
         check=False,
     )
 
-    if result.returncode != 0 or not output_path.exists():
+    if result.returncode == 0 and output_path.exists():
+        return output_path
+
+    # Если встраивание обложки не удалось,
+    # пробуем ещё раз только со звуком и метаданными.
+    fallback_command = [
+        ffmpeg_exe,
+        "-y",
+        "-i",
+        str(source_path),
+        "-vn",
+        "-codec:a",
+        "libmp3lame",
+        "-b:a",
+        "192k",
+        "-id3v2_version",
+        "3",
+        "-metadata",
+        f"title={metadata.title}",
+        "-metadata",
+        f"artist={metadata.performer}",
+        str(output_path),
+    ]
+
+    fallback_result = subprocess.run(
+        fallback_command,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+
+    if (
+        fallback_result.returncode != 0
+        or not output_path.exists()
+    ):
         error_message = (
-            result.stderr.strip()
-            or result.stdout.strip()
+            fallback_result.stderr.strip()
+            or result.stderr.strip()
             or "FFmpeg не смог создать MP3"
         )
 
@@ -468,17 +891,20 @@ def convert_to_mp3(
 def download_audio_as_mp3(
     url: str,
     folder: str,
-) -> Path:
+) -> tuple[Path, AudioMetadata, Path | None]:
     try:
-        source_path = download_audio_source(
+        source_path, metadata = download_audio_source(
             url,
             folder,
         )
 
     except Exception as normal_audio_error:
-        photo_urls, music_url, final_url = (
-            get_tiktok_post_assets(url)
-        )
+        (
+            _,
+            music_url,
+            final_url,
+            metadata,
+        ) = get_tiktok_post_assets(url)
 
         if not music_url:
             raise RuntimeError(
@@ -493,17 +919,31 @@ def download_audio_as_mp3(
             folder,
         )
 
-    return convert_to_mp3(
-        source_path,
+    cover_path = download_thumbnail(
+        metadata,
         folder,
     )
+
+    mp3_path = convert_to_mp3(
+        source_path,
+        folder,
+        metadata,
+        cover_path,
+    )
+
+    return mp3_path, metadata, cover_path
 
 
 def download_photos(
     url: str,
     folder: str,
 ) -> list[Path]:
-    photo_urls, _, final_url = get_tiktok_post_assets(url)
+    (
+        photo_urls,
+        _,
+        final_url,
+        _,
+    ) = get_tiktok_post_assets(url)
 
     if not photo_urls:
         raise RuntimeError(
@@ -571,6 +1011,9 @@ async def handle_link(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
+    if update.message is None:
+        return
+
     text = update.message.text or ""
     url = find_link(text)
 
@@ -674,6 +1117,10 @@ async def handle_download_choice(
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
     query = update.callback_query
+
+    if query is None or query.message is None:
+        return
+
     await query.answer()
 
     message = query.message
@@ -717,18 +1164,37 @@ async def handle_download_choice(
                 )
 
             elif choice == "download_audio":
-                mp3_path = await asyncio.to_thread(
+                (
+                    mp3_path,
+                    metadata,
+                    cover_path,
+                ) = await asyncio.to_thread(
                     download_audio_as_mp3,
                     url,
                     folder,
                 )
 
-                with mp3_path.open("rb") as audio_file:
+                with ExitStack() as stack:
+                    audio_file = stack.enter_context(
+                        mp3_path.open("rb")
+                    )
+
+                    thumbnail_file = None
+
+                    if cover_path and cover_path.exists():
+                        thumbnail_file = stack.enter_context(
+                            cover_path.open("rb")
+                        )
+
                     await message.reply_audio(
                         audio=audio_file,
                         caption="MP3 готов 🎵",
-                        filename="IrisDownloader_audio.mp3",
-                        title="TikTok audio",
+                        filename=(
+                            f"{metadata.title[:50]}.mp3"
+                        ),
+                        title=metadata.title,
+                        performer=metadata.performer,
+                        thumbnail=thumbnail_file,
                     )
 
             else:
