@@ -122,7 +122,7 @@ async def handle_link(
         await update.message.reply_text("Пришли мне ссылку 🔗")
         return
 
-    keyboard = InlineKeyboardMarkup(
+        keyboard = InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
@@ -134,15 +134,8 @@ async def handle_link(
                     callback_data="download_audio",
                 ),
             ],
-            [
-                InlineKeyboardButton(
-                    "🖼 Фотографии",
-                    callback_data="download_photos",
-                )
-            ],
         ]
     )
-
     message = await update.message.reply_text(
         "Что скачать?",
         reply_markup=keyboard,
