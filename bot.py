@@ -84,10 +84,11 @@ async def handle_link(
         await status.delete()
 
     except Exception as error:
-        print(f"Download error: {error}")
+        error_text = str(error)
+        print(f"Download error: {error_text}", flush=True)
         await status.edit_text(
-            "Не получилось скачать это видео 😔\n"
-            "Попробуй другую ссылку или повтори немного позже."
+            "Не получилось скачать видео 😔\n\n"
+            f"Причина:\n{error_text[:3000]}"
         )
 
 
