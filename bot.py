@@ -3,12 +3,14 @@ import html
 import json
 import os
 import re
+import subprocess
 import tempfile
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
 import httpx
+import imageio_ffmpeg
 import yt_dlp
 from telegram import (
     InlineKeyboardButton,
@@ -51,108 +53,28 @@ async def start(
         "Привет! 👋\n\n"
         "Отправь мне ссылку, а затем выбери:\n"
         "🎬 скачать видео\n"
-        "🎵 извлечь звук\n"
+        "🎵 скачать звук в MP3\n"
         "🖼 скачать фотографии"
     )
 
 
 def find_link(text: str) -> str | None:
     match = re.search(r"https?://\S+", text)
-    return match.group(0).rstrip(".,)") if match else None
 
+    if not match:
+        return None
 
-def download_video_or_audio(
-    url: str,
-    folder: str,
-    media_type: str,
-) -> Path:
-    output_template = os.path.join(
-        folder,
-        "%(title).80s-%(id)s.%(ext)s",
-    )
-
-    options: dict[str, Any] = {
-        "outtmpl": output_template,
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-        "restrictfilenames": True,
-    }
-
-    if media_type == "audio":
-        options["format"] = "bestaudio/best"
-    else:
-        options["format"] = "best[ext=mp4]/best"
-
-    with yt_dlp.YoutubeDL(options) as downloader:
-        info = downloader.extract_info(url, download=True)
-        downloaded_path = downloader.prepare_filename(info)
-
-    return Path(downloaded_path)
-
-
-def find_image_posts(data: Any) -> list[str]:
-    """
-    Ищет в JSON TikTok блоки imagePost и получает ссылки
-    на оригинальные изображения.
-    """
-    found_urls: list[str] = []
-
-    def walk(value: Any) -> None:
-        if isinstance(value, dict):
-            image_post = value.get("imagePost")
-
-            if isinstance(image_post, dict):
-                images = image_post.get("images", [])
-
-                if isinstance(images, list):
-                    for image in images:
-                        if not isinstance(image, dict):
-                            continue
-
-                        image_url = (
-                            image.get("imageURL")
-                            or image.get("imageUrl")
-                            or image.get("image_url")
-                        )
-
-                        if not isinstance(image_url, dict):
-                            continue
-
-                        url_list = (
-                            image_url.get("urlList")
-                            or image_url.get("url_list")
-                            or []
-                        )
-
-                        if isinstance(url_list, list):
-                            for image_link in url_list:
-                                if (
-                                    isinstance(image_link, str)
-                                    and image_link.startswith("http")
-                                ):
-                                    found_urls.append(image_link)
-                                    break
-
-            for child in value.values():
-                walk(child)
-
-        elif isinstance(value, list):
-            for child in value:
-                walk(child)
-
-    walk(data)
-
-    # Убираем повторы, сохраняя исходный порядок.
-    return list(dict.fromkeys(found_urls))
+    return match.group(0).rstrip(".,)")
 
 
 def extract_json_objects(page_html: str) -> list[Any]:
     json_objects: list[Any] = []
 
     script_patterns = [
-        r'<script[^>]+id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>'
-        r"(.*?)</script>",
+        (
+            r'<script[^>]+id="__UNIVERSAL_DATA_FOR_REHYDRATION__"'
+            r"[^>]*>(.*?)</script>"
+        ),
         r'<script[^>]+id="SIGI_STATE"[^>]*>(.*?)</script>',
         r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>',
     ]
@@ -175,11 +97,138 @@ def extract_json_objects(page_html: str) -> list[Any]:
     return json_objects
 
 
-def extract_fallback_image_urls(page_html: str) -> list[str]:
-    """
-    Запасной способ, если TikTok изменит JSON:
-    ищет адреса CDN-картинок прямо в HTML.
-    """
+def urls_from_value(value: Any) -> list[str]:
+    found: list[str] = []
+
+    if isinstance(value, str):
+        if value.startswith("http"):
+            found.append(value)
+
+    elif isinstance(value, list):
+        for item in value:
+            found.extend(urls_from_value(item))
+
+    elif isinstance(value, dict):
+        preferred_keys = (
+            "urlList",
+            "url_list",
+            "url",
+            "uri",
+            "src",
+        )
+
+        for key in preferred_keys:
+            if key in value:
+                found.extend(urls_from_value(value[key]))
+
+    return found
+
+
+def find_photo_urls(data: Any) -> list[str]:
+    found_urls: list[str] = []
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            image_post = value.get("imagePost")
+
+            if isinstance(image_post, dict):
+                images = image_post.get("images", [])
+
+                if isinstance(images, list):
+                    for image in images:
+                        if not isinstance(image, dict):
+                            continue
+
+                        image_url = (
+                            image.get("imageURL")
+                            or image.get("imageUrl")
+                            or image.get("image_url")
+                        )
+
+                        candidates = urls_from_value(image_url)
+
+                        if candidates:
+                            found_urls.append(candidates[0])
+
+            for child in value.values():
+                walk(child)
+
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    walk(data)
+
+    return list(dict.fromkeys(found_urls))
+
+
+def find_music_urls(data: Any) -> list[str]:
+    found_urls: list[str] = []
+
+    music_container_names = {
+        "music",
+        "musicinfo",
+        "music_info",
+        "musicdetail",
+        "music_detail",
+    }
+
+    play_url_names = {
+        "playurl",
+        "play_url",
+        "playuri",
+        "play_uri",
+        "playurluri",
+        "play_url_uri",
+        "musicplayurl",
+        "music_play_url",
+    }
+
+    def normalise_key(key: str) -> str:
+        return key.replace("-", "_").lower()
+
+    def walk(value: Any, inside_music: bool = False) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                clean_key = normalise_key(str(key))
+                child_inside_music = (
+                    inside_music
+                    or clean_key in music_container_names
+                )
+
+                if clean_key in play_url_names:
+                    found_urls.extend(urls_from_value(child))
+                    continue
+
+                if child_inside_music and "play" in clean_key:
+                    candidates = urls_from_value(child)
+
+                    for candidate in candidates:
+                        lowered = candidate.lower()
+
+                        if not any(
+                            blocked in lowered
+                            for blocked in (
+                                "cover",
+                                "avatar",
+                                "image",
+                                "thumbnail",
+                            )
+                        ):
+                            found_urls.append(candidate)
+
+                walk(child, child_inside_music)
+
+        elif isinstance(value, list):
+            for child in value:
+                walk(child, inside_music)
+
+    walk(data)
+
+    return list(dict.fromkeys(found_urls))
+
+
+def extract_fallback_photo_urls(page_html: str) -> list[str]:
     decoded = html.unescape(page_html)
     decoded = decoded.replace("\\u002F", "/")
     decoded = decoded.replace("\\/", "/")
@@ -193,15 +242,16 @@ def extract_fallback_image_urls(page_html: str) -> list[str]:
 
     for candidate in candidates:
         cleaned = candidate.rstrip("\\,}]")
+        lowered = cleaned.lower()
 
         looks_like_tiktok_image = (
-            "tiktokcdn" in cleaned
-            or "byteimg" in cleaned
-            or "ibytedtos" in cleaned
+            "tiktokcdn" in lowered
+            or "byteimg" in lowered
+            or "ibytedtos" in lowered
         )
 
-        is_not_avatar = not any(
-            blocked in cleaned.lower()
+        is_not_unwanted = not any(
+            blocked in lowered
             for blocked in (
                 "avatar",
                 "profile",
@@ -210,13 +260,15 @@ def extract_fallback_image_urls(page_html: str) -> list[str]:
             )
         )
 
-        if looks_like_tiktok_image and is_not_avatar:
+        if looks_like_tiktok_image and is_not_unwanted:
             image_urls.append(cleaned)
 
     return list(dict.fromkeys(image_urls))
 
 
-def get_photo_urls(url: str) -> tuple[list[str], str]:
+def get_tiktok_post_assets(
+    url: str,
+) -> tuple[list[str], str | None, str]:
     with httpx.Client(
         headers=BROWSER_HEADERS,
         follow_redirects=True,
@@ -229,32 +281,112 @@ def get_photo_urls(url: str) -> tuple[list[str], str]:
         page_html = response.text
 
     photo_urls: list[str] = []
+    music_urls: list[str] = []
 
     for json_object in extract_json_objects(page_html):
-        photo_urls.extend(find_image_posts(json_object))
+        photo_urls.extend(find_photo_urls(json_object))
+        music_urls.extend(find_music_urls(json_object))
 
     photo_urls = list(dict.fromkeys(photo_urls))
+    music_urls = list(dict.fromkeys(music_urls))
 
     if not photo_urls:
-        photo_urls = extract_fallback_image_urls(page_html)
+        photo_urls = extract_fallback_photo_urls(page_html)
 
-    if not photo_urls:
-        raise RuntimeError(
-            "TikTok не отдал список фотографий. "
-            "Возможно, публикация закрыта или TikTok изменил страницу."
-        )
+    music_url = music_urls[0] if music_urls else None
 
-    return photo_urls, final_url
+    return photo_urls, music_url, final_url
 
 
-def download_photos(
+def download_video(
     url: str,
     folder: str,
-) -> list[Path]:
-    photo_urls, final_url = get_photo_urls(url)
+) -> Path:
+    output_template = os.path.join(
+        folder,
+        "%(title).80s-%(id)s.%(ext)s",
+    )
 
-    downloaded: list[Path] = []
+    options: dict[str, Any] = {
+        "outtmpl": output_template,
+        "format": "best[ext=mp4]/best",
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "restrictfilenames": True,
+    }
 
+    with yt_dlp.YoutubeDL(options) as downloader:
+        info = downloader.extract_info(url, download=True)
+        downloaded_path = downloader.prepare_filename(info)
+
+    path = Path(downloaded_path)
+
+    if not path.exists():
+        candidates = [
+            file
+            for file in Path(folder).iterdir()
+            if file.is_file()
+        ]
+
+        if candidates:
+            path = max(
+                candidates,
+                key=lambda item: item.stat().st_size,
+            )
+
+    return path
+
+
+def download_audio_source(
+    url: str,
+    folder: str,
+) -> Path:
+    output_template = os.path.join(
+        folder,
+        "source-%(id)s.%(ext)s",
+    )
+
+    options: dict[str, Any] = {
+        "outtmpl": output_template,
+        "format": "bestaudio/best",
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "restrictfilenames": True,
+    }
+
+    with yt_dlp.YoutubeDL(options) as downloader:
+        info = downloader.extract_info(url, download=True)
+        downloaded_path = downloader.prepare_filename(info)
+
+    path = Path(downloaded_path)
+
+    if path.exists():
+        return path
+
+    candidates = [
+        file
+        for file in Path(folder).iterdir()
+        if file.is_file() and file.suffix.lower() != ".mp3"
+    ]
+
+    if not candidates:
+        raise FileNotFoundError(
+            "Исходная аудиодорожка не найдена"
+        )
+
+    return max(
+        candidates,
+        key=lambda item: item.stat().st_size,
+    )
+
+
+def download_direct_music(
+    music_url: str,
+    final_url: str,
+    folder: str,
+) -> Path:
     headers = {
         **BROWSER_HEADERS,
         "Referer": final_url,
@@ -263,9 +395,138 @@ def download_photos(
     with httpx.Client(
         headers=headers,
         follow_redirects=True,
+        timeout=45,
+    ) as client:
+        response = client.get(music_url)
+        response.raise_for_status()
+
+    content_type = response.headers.get(
+        "content-type",
+        "",
+    ).lower()
+
+    if "mpeg" in content_type:
+        extension = ".mp3"
+    elif "ogg" in content_type:
+        extension = ".ogg"
+    elif "webm" in content_type:
+        extension = ".webm"
+    else:
+        extension = ".m4a"
+
+    source_path = Path(folder) / f"photo_music{extension}"
+    source_path.write_bytes(response.content)
+
+    if source_path.stat().st_size < 5_000:
+        raise RuntimeError(
+            "TikTok отдал слишком маленький музыкальный файл"
+        )
+
+    return source_path
+
+
+def convert_to_mp3(
+    source_path: Path,
+    folder: str,
+) -> Path:
+    output_path = Path(folder) / "IrisDownloader_audio.mp3"
+    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+
+    command = [
+        ffmpeg_exe,
+        "-y",
+        "-i",
+        str(source_path),
+        "-vn",
+        "-codec:a",
+        "libmp3lame",
+        "-b:a",
+        "192k",
+        str(output_path),
+    ]
+
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+
+    if result.returncode != 0 or not output_path.exists():
+        error_message = (
+            result.stderr.strip()
+            or result.stdout.strip()
+            or "FFmpeg не смог создать MP3"
+        )
+
+        raise RuntimeError(error_message[-2000:])
+
+    return output_path
+
+
+def download_audio_as_mp3(
+    url: str,
+    folder: str,
+) -> Path:
+    try:
+        source_path = download_audio_source(
+            url,
+            folder,
+        )
+
+    except Exception as normal_audio_error:
+        photo_urls, music_url, final_url = (
+            get_tiktok_post_assets(url)
+        )
+
+        if not music_url:
+            raise RuntimeError(
+                "Не удалось найти музыку в фотопубликации.\n"
+                f"Обычная загрузка тоже не сработала: "
+                f"{normal_audio_error}"
+            ) from normal_audio_error
+
+        source_path = download_direct_music(
+            music_url,
+            final_url,
+            folder,
+        )
+
+    return convert_to_mp3(
+        source_path,
+        folder,
+    )
+
+
+def download_photos(
+    url: str,
+    folder: str,
+) -> list[Path]:
+    photo_urls, _, final_url = get_tiktok_post_assets(url)
+
+    if not photo_urls:
+        raise RuntimeError(
+            "TikTok не отдал список фотографий. "
+            "Возможно, публикация закрыта."
+        )
+
+    headers = {
+        **BROWSER_HEADERS,
+        "Referer": final_url,
+    }
+
+    downloaded: list[Path] = []
+
+    with httpx.Client(
+        headers=headers,
+        follow_redirects=True,
         timeout=40,
     ) as client:
-        for index, photo_url in enumerate(photo_urls, start=1):
+        for index, photo_url in enumerate(
+            photo_urls,
+            start=1,
+        ):
             try:
                 response = client.get(photo_url)
                 response.raise_for_status()
@@ -288,7 +549,6 @@ def download_photos(
 
                 photo_path.write_bytes(response.content)
 
-                # Не сохраняем подозрительно маленькие файлы.
                 if photo_path.stat().st_size < 5_000:
                     photo_path.unlink(missing_ok=True)
                     continue
@@ -315,7 +575,9 @@ async def handle_link(
     url = find_link(text)
 
     if not url:
-        await update.message.reply_text("Пришли мне ссылку 🔗")
+        await update.message.reply_text(
+            "Пришли мне ссылку 🔗"
+        )
         return
 
     keyboard = InlineKeyboardMarkup(
@@ -326,7 +588,7 @@ async def handle_link(
                     callback_data="download_video",
                 ),
                 InlineKeyboardButton(
-                    "🎵 Звук",
+                    "🎵 MP3",
                     callback_data="download_audio",
                 ),
             ],
@@ -344,29 +606,39 @@ async def handle_link(
         reply_markup=keyboard,
     )
 
-    context.user_data[f"url_{message.message_id}"] = url
+    context.user_data[
+        f"url_{message.message_id}"
+    ] = url
 
 
 async def send_photo_albums(
     message,
     photo_paths: list[Path],
 ) -> None:
-    # Telegram принимает не более 10 файлов в одном альбоме.
-    for start_index in range(0, len(photo_paths), 10):
-        chunk = photo_paths[start_index : start_index + 10]
+    for start_index in range(
+        0,
+        len(photo_paths),
+        10,
+    ):
+        chunk = photo_paths[
+            start_index : start_index + 10
+        ]
 
-        # Если осталась одна картинка, отправляем её отдельно.
         if len(chunk) == 1:
             with chunk[0].open("rb") as photo_file:
-                await message.reply_photo(
-                    photo=photo_file,
-                    caption=(
+                caption = None
+
+                if start_index == 0:
+                    caption = (
                         f"Готово 🖼\n"
                         f"Фотографий: {len(photo_paths)}"
-                        if start_index == 0
-                        else None
-                    ),
+                    )
+
+                await message.reply_photo(
+                    photo=photo_file,
+                    caption=caption,
                 )
+
             continue
 
         with ExitStack() as stack:
@@ -392,7 +664,9 @@ async def send_photo_albums(
                     )
                 )
 
-            await message.reply_media_group(media=media)
+            await message.reply_media_group(
+                media=media
+            )
 
 
 async def handle_download_choice(
@@ -417,12 +691,15 @@ async def handle_download_choice(
 
     loading_texts = {
         "download_video": "Скачиваю видео… ⏳",
-        "download_audio": "Извлекаю звук… ⏳",
+        "download_audio": "Готовлю MP3… ⏳",
         "download_photos": "Скачиваю фотографии… ⏳",
     }
 
     await query.edit_message_text(
-        loading_texts.get(choice, "Обрабатываю… ⏳")
+        loading_texts.get(
+            choice,
+            "Обрабатываю… ⏳",
+        )
     )
 
     try:
@@ -439,43 +716,45 @@ async def handle_download_choice(
                     photo_paths,
                 )
 
-            else:
-                media_type = (
-                    "audio"
-                    if choice == "download_audio"
-                    else "video"
-                )
-
-                file_path = await asyncio.to_thread(
-                    download_video_or_audio,
+            elif choice == "download_audio":
+                mp3_path = await asyncio.to_thread(
+                    download_audio_as_mp3,
                     url,
                     folder,
-                    media_type,
                 )
 
-                if not file_path.exists():
+                with mp3_path.open("rb") as audio_file:
+                    await message.reply_audio(
+                        audio=audio_file,
+                        caption="MP3 готов 🎵",
+                        filename="IrisDownloader_audio.mp3",
+                        title="TikTok audio",
+                    )
+
+            else:
+                video_path = await asyncio.to_thread(
+                    download_video,
+                    url,
+                    folder,
+                )
+
+                if not video_path.exists():
                     raise FileNotFoundError(
                         "Скачанный файл не найден"
                     )
 
-                with file_path.open("rb") as media_file:
-                    if media_type == "audio":
-                        await message.reply_audio(
-                            audio=media_file,
-                            caption="Звук готов 🎵",
-                            filename=file_path.name,
-                        )
-                    else:
-                        await message.reply_video(
-                            video=media_file,
-                            caption="Видео готово ✅",
-                            supports_streaming=True,
-                        )
+                with video_path.open("rb") as video_file:
+                    await message.reply_video(
+                        video=video_file,
+                        caption="Видео готово ✅",
+                        supports_streaming=True,
+                    )
 
         await message.delete()
 
     except Exception as error:
         error_text = str(error)
+
         print(
             f"Download error: {error_text}",
             flush=True,
