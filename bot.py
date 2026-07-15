@@ -6,10 +6,20 @@ from pathlib import Path
 
 import yt_dlp
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
+PORT = int(os.environ.get("PORT", "10000"))
+RENDER_EXTERNAL_URL = os.environ["RENDER_EXTERNAL_URL"]
+WEBHOOK_PATH = "telegram"
+WEBHOOK_URL = f"{RENDER_EXTERNAL_URL}/{WEBHOOK_PATH}"
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -39,9 +49,9 @@ def download_video(url: str, folder: str) -> Path:
 
     with yt_dlp.YoutubeDL(options) as downloader:
         info = downloader.extract_info(url, download=True)
-        filename = downloader.prepare_filename(info)
+        downloaded_path = downloader.prepare_filename(info)
 
-    return Path(filename)
+    return Path(downloaded_path)
 
 
 async def handle_link(
@@ -89,7 +99,13 @@ def main() -> None:
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link)
     )
 
-    application.run_polling(drop_pending_updates=True)
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=WEBHOOK_PATH,
+        webhook_url=WEBHOOK_URL,
+        drop_pending_updates=True,
+    )
 
 
 if __name__ == "__main__":
