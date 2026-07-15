@@ -8,7 +8,7 @@ import tempfile
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 import imageio_ffmpeg
@@ -19,6 +19,7 @@ from telegram import (
     InputMediaPhoto,
     Update,
 )
+from telegram.error import NetworkError, TimedOut
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -96,9 +97,9 @@ def clean_text(
 
 
 def extract_json_objects(page_html: str) -> list[Any]:
-    json_objects: list[Any] = []
+    objects: list[Any] = []
 
-    script_patterns = [
+    patterns = [
         (
             r'<script[^>]+id="__UNIVERSAL_DATA_FOR_REHYDRATION__"'
             r"[^>]*>(.*?)</script>"
@@ -107,7 +108,7 @@ def extract_json_objects(page_html: str) -> list[Any]:
         r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>',
     ]
 
-    for pattern in script_patterns:
+    for pattern in patterns:
         matches = re.findall(
             pattern,
             page_html,
@@ -115,14 +116,14 @@ def extract_json_objects(page_html: str) -> list[Any]:
         )
 
         for match in matches:
-            cleaned = html.unescape(match.strip())
-
             try:
-                json_objects.append(json.loads(cleaned))
+                objects.append(
+                    json.loads(html.unescape(match.strip()))
+                )
             except json.JSONDecodeError:
                 continue
 
-    return json_objects
+    return objects
 
 
 def urls_from_value(value: Any) -> list[str]:
@@ -137,15 +138,13 @@ def urls_from_value(value: Any) -> list[str]:
             found.extend(urls_from_value(item))
 
     elif isinstance(value, dict):
-        preferred_keys = (
+        for key in (
             "urlList",
             "url_list",
             "url",
             "uri",
             "src",
-        )
-
-        for key in preferred_keys:
+        ):
             if key in value:
                 found.extend(urls_from_value(value[key]))
 
@@ -158,7 +157,7 @@ def first_url(value: Any) -> str | None:
 
 
 def find_photo_urls(data: Any) -> list[str]:
-    found_urls: list[str] = []
+    found: list[str] = []
 
     def walk(value: Any) -> None:
         if isinstance(value, dict):
@@ -181,7 +180,7 @@ def find_photo_urls(data: Any) -> list[str]:
                         image_link = first_url(image_url)
 
                         if image_link:
-                            found_urls.append(image_link)
+                            found.append(image_link)
 
             for child in value.values():
                 walk(child)
@@ -192,35 +191,44 @@ def find_photo_urls(data: Any) -> list[str]:
 
     walk(data)
 
-    return list(dict.fromkeys(found_urls))
+    return list(dict.fromkeys(found))
 
 
 def looks_like_audio_url(url: str) -> bool:
     lowered = url.lower()
 
-    blocked_words = (
-        "avatar",
-        "image",
-        "cover",
-        "thumbnail",
-        "profile",
+    return not any(
+        blocked in lowered
+        for blocked in (
+            "avatar",
+            "image",
+            "cover",
+            "thumbnail",
+            "profile",
+        )
     )
-
-    return not any(word in lowered for word in blocked_words)
 
 
 def extract_music_from_dict(
     music: dict[str, Any],
 ) -> tuple[str | None, str | None, str | None, str | None]:
-    title_keys = (
+    title = None
+    performer = None
+    music_url = None
+    cover_url = None
+
+    for key in (
         "title",
         "musicName",
         "music_name",
         "songName",
         "song_name",
-    )
+    ):
+        if isinstance(music.get(key), str):
+            title = music[key]
+            break
 
-    performer_keys = (
+    for key in (
         "authorName",
         "author_name",
         "artist",
@@ -228,9 +236,12 @@ def extract_music_from_dict(
         "artist_name",
         "ownerName",
         "owner_name",
-    )
+    ):
+        if isinstance(music.get(key), str):
+            performer = music[key]
+            break
 
-    play_keys = (
+    for key in (
         "playUrl",
         "playURL",
         "play_url",
@@ -238,9 +249,14 @@ def extract_music_from_dict(
         "play_uri",
         "musicPlayUrl",
         "music_play_url",
-    )
+    ):
+        candidate = first_url(music.get(key))
 
-    cover_keys = (
+        if candidate and looks_like_audio_url(candidate):
+            music_url = candidate
+            break
+
+    for key in (
         "coverLarge",
         "cover_large",
         "coverMedium",
@@ -250,31 +266,7 @@ def extract_music_from_dict(
         "cover",
         "albumCover",
         "album_cover",
-    )
-
-    title: str | None = None
-    performer: str | None = None
-    music_url: str | None = None
-    cover_url: str | None = None
-
-    for key in title_keys:
-        if isinstance(music.get(key), str):
-            title = music[key]
-            break
-
-    for key in performer_keys:
-        if isinstance(music.get(key), str):
-            performer = music[key]
-            break
-
-    for key in play_keys:
-        candidate = first_url(music.get(key))
-
-        if candidate and looks_like_audio_url(candidate):
-            music_url = candidate
-            break
-
-    for key in cover_keys:
+    ):
         candidate = first_url(music.get(key))
 
         if candidate:
@@ -287,20 +279,18 @@ def extract_music_from_dict(
 def find_music_metadata(
     data: Any,
 ) -> tuple[str | None, str | None, str | None, str | None]:
-    best_title: str | None = None
-    best_performer: str | None = None
-    best_music_url: str | None = None
-    best_cover_url: str | None = None
+    title = None
+    performer = None
+    music_url = None
+    cover_url = None
 
-    music_container_names = {
+    music_names = {
         "music",
         "musicinfo",
-        "music_info",
         "musicdetail",
-        "music_detail",
     }
 
-    def normalise_key(key: str) -> str:
+    def normalize(key: str) -> str:
         return (
             key.replace("-", "")
             .replace("_", "")
@@ -308,37 +298,28 @@ def find_music_metadata(
         )
 
     def walk(value: Any) -> None:
-        nonlocal best_title
-        nonlocal best_performer
-        nonlocal best_music_url
-        nonlocal best_cover_url
+        nonlocal title
+        nonlocal performer
+        nonlocal music_url
+        nonlocal cover_url
 
         if isinstance(value, dict):
             for key, child in value.items():
-                clean_key = normalise_key(str(key))
-
                 if (
-                    clean_key in music_container_names
+                    normalize(str(key)) in music_names
                     and isinstance(child, dict)
                 ):
                     (
-                        title,
-                        performer,
-                        music_url,
-                        cover_url,
+                        found_title,
+                        found_performer,
+                        found_music_url,
+                        found_cover_url,
                     ) = extract_music_from_dict(child)
 
-                    if title and not best_title:
-                        best_title = title
-
-                    if performer and not best_performer:
-                        best_performer = performer
-
-                    if music_url and not best_music_url:
-                        best_music_url = music_url
-
-                    if cover_url and not best_cover_url:
-                        best_cover_url = cover_url
+                    title = title or found_title
+                    performer = performer or found_performer
+                    music_url = music_url or found_music_url
+                    cover_url = cover_url or found_cover_url
 
                 walk(child)
 
@@ -348,43 +329,42 @@ def find_music_metadata(
 
     walk(data)
 
-    return (
-        best_title,
-        best_performer,
-        best_music_url,
-        best_cover_url,
-    )
+    return title, performer, music_url, cover_url
 
 
 def find_post_author(data: Any) -> str | None:
-    author_keys = {
-        "uniqueid",
-        "unique_id",
-        "nickname",
-        "username",
-    }
-
     found: list[str] = []
 
     def walk(value: Any, inside_author: bool = False) -> None:
         if isinstance(value, dict):
             for key, child in value.items():
-                clean_key = str(key).replace("-", "_").lower()
+                normalized = str(key).replace("-", "_").lower()
 
-                child_inside_author = (
+                now_inside_author = (
                     inside_author
-                    or clean_key in {"author", "authorinfo", "author_info"}
+                    or normalized
+                    in {
+                        "author",
+                        "authorinfo",
+                        "author_info",
+                    }
                 )
 
                 if (
-                    child_inside_author
-                    and clean_key in author_keys
+                    now_inside_author
+                    and normalized
+                    in {
+                        "uniqueid",
+                        "unique_id",
+                        "nickname",
+                        "username",
+                    }
                     and isinstance(child, str)
                     and child.strip()
                 ):
                     found.append(child.strip())
 
-                walk(child, child_inside_author)
+                walk(child, now_inside_author)
 
         elif isinstance(value, list):
             for child in value:
@@ -405,19 +385,19 @@ def extract_fallback_photo_urls(page_html: str) -> list[str]:
         decoded,
     )
 
-    image_urls: list[str] = []
+    found: list[str] = []
 
     for candidate in candidates:
         cleaned = candidate.rstrip("\\,}]")
         lowered = cleaned.lower()
 
-        looks_like_tiktok_image = (
+        looks_like_image = (
             "tiktokcdn" in lowered
             or "byteimg" in lowered
             or "ibytedtos" in lowered
         )
 
-        is_not_unwanted = not any(
+        unwanted = any(
             blocked in lowered
             for blocked in (
                 "avatar",
@@ -426,10 +406,10 @@ def extract_fallback_photo_urls(page_html: str) -> list[str]:
             )
         )
 
-        if looks_like_tiktok_image and is_not_unwanted:
-            image_urls.append(cleaned)
+        if looks_like_image and not unwanted:
+            found.append(cleaned)
 
-    return list(dict.fromkeys(image_urls))
+    return list(dict.fromkeys(found))
 
 
 def get_tiktok_post_assets(
@@ -438,7 +418,7 @@ def get_tiktok_post_assets(
     with httpx.Client(
         headers=BROWSER_HEADERS,
         follow_redirects=True,
-        timeout=30,
+        timeout=httpx.Timeout(45),
     ) as client:
         response = client.get(url)
         response.raise_for_status()
@@ -447,38 +427,27 @@ def get_tiktok_post_assets(
         page_html = response.text
 
     photo_urls: list[str] = []
-    music_url: str | None = None
-    title: str | None = None
-    performer: str | None = None
-    cover_url: str | None = None
-    post_author: str | None = None
+    music_url = None
+    title = None
+    performer = None
+    cover_url = None
+    post_author = None
 
-    json_objects = extract_json_objects(page_html)
-
-    for json_object in json_objects:
-        photo_urls.extend(find_photo_urls(json_object))
+    for data in extract_json_objects(page_html):
+        photo_urls.extend(find_photo_urls(data))
 
         (
             found_title,
             found_performer,
             found_music_url,
             found_cover_url,
-        ) = find_music_metadata(json_object)
+        ) = find_music_metadata(data)
 
-        if found_title and not title:
-            title = found_title
-
-        if found_performer and not performer:
-            performer = found_performer
-
-        if found_music_url and not music_url:
-            music_url = found_music_url
-
-        if found_cover_url and not cover_url:
-            cover_url = found_cover_url
-
-        if not post_author:
-            post_author = find_post_author(json_object)
+        title = title or found_title
+        performer = performer or found_performer
+        music_url = music_url or found_music_url
+        cover_url = cover_url or found_cover_url
+        post_author = post_author or find_post_author(data)
 
     photo_urls = list(dict.fromkeys(photo_urls))
 
@@ -537,14 +506,12 @@ def metadata_from_yt_dlp(
 
         if isinstance(thumbnails, list):
             for thumbnail in reversed(thumbnails):
-                if not isinstance(thumbnail, dict):
-                    continue
+                if isinstance(thumbnail, dict):
+                    candidate = thumbnail.get("url")
 
-                candidate = thumbnail.get("url")
-
-                if isinstance(candidate, str):
-                    cover_url = candidate
-                    break
+                    if isinstance(candidate, str):
+                        cover_url = candidate
+                        break
 
     return AudioMetadata(
         title=clean_text(
@@ -567,18 +534,20 @@ def download_video(
     url: str,
     folder: str,
 ) -> Path:
-    output_template = os.path.join(
+    template = os.path.join(
         folder,
         "%(title).80s-%(id)s.%(ext)s",
     )
 
     options: dict[str, Any] = {
-        "outtmpl": output_template,
+        "outtmpl": template,
         "format": "best[ext=mp4]/best",
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
         "restrictfilenames": True,
+        "socket_timeout": 45,
+        "retries": 2,
     }
 
     with yt_dlp.YoutubeDL(options) as downloader:
@@ -591,15 +560,15 @@ def download_video(
     path = Path(downloaded_path)
 
     if not path.exists():
-        candidates = [
+        files = [
             file
             for file in Path(folder).iterdir()
             if file.is_file()
         ]
 
-        if candidates:
+        if files:
             path = max(
-                candidates,
+                files,
                 key=lambda item: item.stat().st_size,
             )
 
@@ -610,18 +579,20 @@ def download_audio_source(
     url: str,
     folder: str,
 ) -> tuple[Path, AudioMetadata]:
-    output_template = os.path.join(
+    template = os.path.join(
         folder,
         "source-%(id)s.%(ext)s",
     )
 
     options: dict[str, Any] = {
-        "outtmpl": output_template,
+        "outtmpl": template,
         "format": "bestaudio/best",
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
         "restrictfilenames": True,
+        "socket_timeout": 45,
+        "retries": 2,
     }
 
     with yt_dlp.YoutubeDL(options) as downloader:
@@ -649,12 +620,13 @@ def download_audio_source(
             "Исходная аудиодорожка не найдена"
         )
 
-    path = max(
-        candidates,
-        key=lambda item: item.stat().st_size,
+    return (
+        max(
+            candidates,
+            key=lambda item: item.stat().st_size,
+        ),
+        metadata,
     )
-
-    return path, metadata
 
 
 def download_direct_music(
@@ -670,7 +642,7 @@ def download_direct_music(
     with httpx.Client(
         headers=headers,
         follow_redirects=True,
-        timeout=45,
+        timeout=httpx.Timeout(60),
     ) as client:
         response = client.get(music_url)
         response.raise_for_status()
@@ -689,15 +661,15 @@ def download_direct_music(
     else:
         extension = ".m4a"
 
-    source_path = Path(folder) / f"photo_music{extension}"
-    source_path.write_bytes(response.content)
+    path = Path(folder) / f"photo_music{extension}"
+    path.write_bytes(response.content)
 
-    if source_path.stat().st_size < 5_000:
+    if path.stat().st_size < 5_000:
         raise RuntimeError(
             "TikTok отдал слишком маленький музыкальный файл"
         )
 
-    return source_path
+    return path
 
 
 def download_thumbnail(
@@ -718,7 +690,7 @@ def download_thumbnail(
         with httpx.Client(
             headers=headers,
             follow_redirects=True,
-            timeout=30,
+            timeout=httpx.Timeout(45),
         ) as client:
             response = client.get(metadata.cover_url)
             response.raise_for_status()
@@ -731,32 +703,28 @@ def download_thumbnail(
     except httpx.HTTPError:
         return None
 
-    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-    thumbnail_path = Path(folder) / "cover.jpg"
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    output = Path(folder) / "cover.jpg"
 
-    quality_values = (5, 9, 13, 17, 21, 25)
-
-    for quality in quality_values:
-        command = [
-            ffmpeg_exe,
-            "-y",
-            "-i",
-            str(raw_cover),
-            "-vf",
-            (
-                "scale=320:320:"
-                "force_original_aspect_ratio=decrease,"
-                "pad=320:320:(ow-iw)/2:(oh-ih)/2"
-            ),
-            "-frames:v",
-            "1",
-            "-q:v",
-            str(quality),
-            str(thumbnail_path),
-        ]
-
+    for quality in (5, 9, 13, 17, 21, 25):
         result = subprocess.run(
-            command,
+            [
+                ffmpeg,
+                "-y",
+                "-i",
+                str(raw_cover),
+                "-vf",
+                (
+                    "scale=320:320:"
+                    "force_original_aspect_ratio=decrease,"
+                    "pad=320:320:(ow-iw)/2:(oh-ih)/2"
+                ),
+                "-frames:v",
+                "1",
+                "-q:v",
+                str(quality),
+                str(output),
+            ],
             capture_output=True,
             text=True,
             timeout=90,
@@ -765,35 +733,35 @@ def download_thumbnail(
 
         if (
             result.returncode == 0
-            and thumbnail_path.exists()
-            and thumbnail_path.stat().st_size <= 190_000
+            and output.exists()
+            and output.stat().st_size <= 190_000
         ):
-            return thumbnail_path
+            return output
 
     return None
 
 
 def convert_to_mp3(
-    source_path: Path,
+    source: Path,
     folder: str,
     metadata: AudioMetadata,
-    cover_path: Path | None,
+    cover: Path | None,
 ) -> Path:
-    output_path = Path(folder) / "IrisDownloader_audio.mp3"
-    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    output = Path(folder) / "IrisDownloader_audio.mp3"
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
 
-    base_command = [
-        ffmpeg_exe,
+    base = [
+        ffmpeg,
         "-y",
         "-i",
-        str(source_path),
+        str(source),
     ]
 
-    if cover_path:
+    if cover:
         command = [
-            *base_command,
+            *base,
             "-i",
-            str(cover_path),
+            str(cover),
             "-map",
             "0:a:0",
             "-map",
@@ -814,11 +782,11 @@ def convert_to_mp3(
             f"title={metadata.title}",
             "-metadata",
             f"artist={metadata.performer}",
-            str(output_path),
+            str(output),
         ]
     else:
         command = [
-            *base_command,
+            *base,
             "-vn",
             "-codec:a",
             "libmp3lame",
@@ -830,7 +798,7 @@ def convert_to_mp3(
             f"title={metadata.title}",
             "-metadata",
             f"artist={metadata.performer}",
-            str(output_path),
+            str(output),
         ]
 
     result = subprocess.run(
@@ -841,51 +809,44 @@ def convert_to_mp3(
         check=False,
     )
 
-    if result.returncode == 0 and output_path.exists():
-        return output_path
+    if result.returncode == 0 and output.exists():
+        return output
 
-    # Если встраивание обложки не удалось,
-    # пробуем ещё раз только со звуком и метаданными.
-    fallback_command = [
-        ffmpeg_exe,
-        "-y",
-        "-i",
-        str(source_path),
-        "-vn",
-        "-codec:a",
-        "libmp3lame",
-        "-b:a",
-        "192k",
-        "-id3v2_version",
-        "3",
-        "-metadata",
-        f"title={metadata.title}",
-        "-metadata",
-        f"artist={metadata.performer}",
-        str(output_path),
-    ]
-
-    fallback_result = subprocess.run(
-        fallback_command,
+    fallback = subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(source),
+            "-vn",
+            "-codec:a",
+            "libmp3lame",
+            "-b:a",
+            "192k",
+            "-id3v2_version",
+            "3",
+            "-metadata",
+            f"title={metadata.title}",
+            "-metadata",
+            f"artist={metadata.performer}",
+            str(output),
+        ],
         capture_output=True,
         text=True,
         timeout=180,
         check=False,
     )
 
-    if (
-        fallback_result.returncode != 0
-        or not output_path.exists()
-    ):
-        error_message = (
-            fallback_result.stderr.strip()
+    if fallback.returncode != 0 or not output.exists():
+        error = (
+            fallback.stderr.strip()
             or result.stderr.strip()
             or "FFmpeg не смог создать MP3"
         )
 
-        raise RuntimeError(error_message[-2000:])
+        raise RuntimeError(error[-2000:])
 
-    return output_path
+    return output
 
 
 def download_audio_as_mp3(
@@ -893,12 +854,12 @@ def download_audio_as_mp3(
     folder: str,
 ) -> tuple[Path, AudioMetadata, Path | None]:
     try:
-        source_path, metadata = download_audio_source(
+        source, metadata = download_audio_source(
             url,
             folder,
         )
 
-    except Exception as normal_audio_error:
+    except Exception as normal_error:
         (
             _,
             music_url,
@@ -910,28 +871,28 @@ def download_audio_as_mp3(
             raise RuntimeError(
                 "Не удалось найти музыку в фотопубликации.\n"
                 f"Обычная загрузка тоже не сработала: "
-                f"{normal_audio_error}"
-            ) from normal_audio_error
+                f"{normal_error}"
+            ) from normal_error
 
-        source_path = download_direct_music(
+        source = download_direct_music(
             music_url,
             final_url,
             folder,
         )
 
-    cover_path = download_thumbnail(
+    cover = download_thumbnail(
         metadata,
         folder,
     )
 
-    mp3_path = convert_to_mp3(
-        source_path,
+    mp3 = convert_to_mp3(
+        source,
         folder,
         metadata,
-        cover_path,
+        cover,
     )
 
-    return mp3_path, metadata, cover_path
+    return mp3, metadata, cover
 
 
 def download_photos(
@@ -947,8 +908,7 @@ def download_photos(
 
     if not photo_urls:
         raise RuntimeError(
-            "TikTok не отдал список фотографий. "
-            "Возможно, публикация закрыта."
+            "TikTok не отдал список фотографий."
         )
 
     headers = {
@@ -961,7 +921,7 @@ def download_photos(
     with httpx.Client(
         headers=headers,
         follow_redirects=True,
-        timeout=40,
+        timeout=httpx.Timeout(60),
     ) as client:
         for index, photo_url in enumerate(
             photo_urls,
@@ -983,28 +943,87 @@ def download_photos(
                 else:
                     extension = ".jpg"
 
-                photo_path = Path(folder) / (
+                path = Path(folder) / (
                     f"tiktok_photo_{index:02d}{extension}"
                 )
 
-                photo_path.write_bytes(response.content)
+                path.write_bytes(response.content)
 
-                if photo_path.stat().st_size < 5_000:
-                    photo_path.unlink(missing_ok=True)
+                if path.stat().st_size < 5_000:
+                    path.unlink(missing_ok=True)
                     continue
 
-                downloaded.append(photo_path)
+                downloaded.append(path)
 
             except httpx.HTTPError:
                 continue
 
     if not downloaded:
         raise RuntimeError(
-            "Ссылки на фотографии найдены, "
-            "но TikTok не разрешил их скачать."
+            "TikTok не разрешил скачать фотографии."
         )
 
     return downloaded
+
+
+def is_temporary_error(error: Exception) -> bool:
+    text = str(error).lower()
+
+    temporary_words = (
+        "timed out",
+        "timeout",
+        "temporarily",
+        "connection reset",
+        "connection error",
+        "network",
+        "remote end closed",
+        "server disconnected",
+        "502",
+        "503",
+        "504",
+    )
+
+    return (
+        isinstance(
+            error,
+            (
+                TimeoutError,
+                TimedOut,
+                NetworkError,
+                httpx.TimeoutException,
+                httpx.NetworkError,
+            ),
+        )
+        or any(word in text for word in temporary_words)
+    )
+
+
+async def run_with_retry(
+    operation: Callable[..., Any],
+    *args: Any,
+    status_message,
+) -> Any:
+    try:
+        return await asyncio.to_thread(
+            operation,
+            *args,
+        )
+
+    except Exception as first_error:
+        if not is_temporary_error(first_error):
+            raise
+
+        await status_message.edit_text(
+            "Первая попытка не удалась.\n"
+            "Повторяю ещё раз… 🔄"
+        )
+
+        await asyncio.sleep(3)
+
+        return await asyncio.to_thread(
+            operation,
+            *args,
+        )
 
 
 async def handle_link(
@@ -1014,8 +1033,7 @@ async def handle_link(
     if update.message is None:
         return
 
-    text = update.message.text or ""
-    url = find_link(text)
+    url = find_link(update.message.text or "")
 
     if not url:
         await update.message.reply_text(
@@ -1068,18 +1086,15 @@ async def send_photo_albums(
         ]
 
         if len(chunk) == 1:
-            with chunk[0].open("rb") as photo_file:
-                caption = None
-
-                if start_index == 0:
-                    caption = (
+            with chunk[0].open("rb") as photo:
+                await message.reply_photo(
+                    photo=photo,
+                    caption=(
                         f"Готово 🖼\n"
                         f"Фотографий: {len(photo_paths)}"
-                    )
-
-                await message.reply_photo(
-                    photo=photo_file,
-                    caption=caption,
+                        if start_index == 0
+                        else None
+                    ),
                 )
 
             continue
@@ -1088,7 +1103,7 @@ async def send_photo_albums(
             media: list[InputMediaPhoto] = []
 
             for index, photo_path in enumerate(chunk):
-                photo_file = stack.enter_context(
+                photo = stack.enter_context(
                     photo_path.open("rb")
                 )
 
@@ -1102,7 +1117,7 @@ async def send_photo_albums(
 
                 media.append(
                     InputMediaPhoto(
-                        media=photo_file,
+                        media=photo,
                         caption=caption,
                     )
                 )
@@ -1124,6 +1139,23 @@ async def handle_download_choice(
     await query.answer()
 
     message = query.message
+    task_key = (
+        f"{message.chat_id}:"
+        f"{message.message_id}"
+    )
+
+    active_tasks: set[str] = context.bot_data.setdefault(
+        "active_tasks",
+        set(),
+    )
+
+    if task_key in active_tasks:
+        await query.answer(
+            "Загрузка уже выполняется ⏳",
+            show_alert=True,
+        )
+        return
+
     url = context.user_data.get(
         f"url_{message.message_id}"
     )
@@ -1134,7 +1166,7 @@ async def handle_download_choice(
         )
         return
 
-    choice = query.data
+    active_tasks.add(task_key)
 
     loading_texts = {
         "download_video": "Скачиваю видео… ⏳",
@@ -1144,72 +1176,75 @@ async def handle_download_choice(
 
     await query.edit_message_text(
         loading_texts.get(
-            choice,
+            query.data,
             "Обрабатываю… ⏳",
         )
     )
 
     try:
         with tempfile.TemporaryDirectory() as folder:
-            if choice == "download_photos":
-                photo_paths = await asyncio.to_thread(
+            if query.data == "download_photos":
+                photos = await run_with_retry(
                     download_photos,
                     url,
                     folder,
+                    status_message=message,
                 )
 
                 await send_photo_albums(
                     message,
-                    photo_paths,
+                    photos,
                 )
 
-            elif choice == "download_audio":
+            elif query.data == "download_audio":
                 (
-                    mp3_path,
+                    mp3,
                     metadata,
-                    cover_path,
-                ) = await asyncio.to_thread(
+                    cover,
+                ) = await run_with_retry(
                     download_audio_as_mp3,
                     url,
                     folder,
+                    status_message=message,
                 )
 
                 with ExitStack() as stack:
-                    audio_file = stack.enter_context(
-                        mp3_path.open("rb")
+                    audio = stack.enter_context(
+                        mp3.open("rb")
                     )
 
-                    thumbnail_file = None
+                    thumbnail = None
 
-                    if cover_path and cover_path.exists():
-                        thumbnail_file = stack.enter_context(
-                            cover_path.open("rb")
+                    if cover and cover.exists():
+                        thumbnail = stack.enter_context(
+                            cover.open("rb")
                         )
 
                     await message.reply_audio(
-                        audio=audio_file,
+                        audio=audio,
                         caption="MP3 готов 🎵",
                         filename=(
                             f"{metadata.title[:50]}.mp3"
                         ),
                         title=metadata.title,
                         performer=metadata.performer,
-                        thumbnail=thumbnail_file,
+                        thumbnail=thumbnail,
                     )
 
             else:
-                video_path = await asyncio.to_thread(
+                video = await run_with_retry(
                     download_video,
                     url,
                     folder,
+                    status_message=message,
                 )
 
-                if not video_path.exists():
+                if not video.exists():
                     raise FileNotFoundError(
                         "Скачанный файл не найден"
                     )
 
-                with video_path.open("rb") as video_file:
+                with video.open("rb") as video_file:
                     await message.reply_video(
                         video=video_file,
                         caption="Видео готово ✅",
@@ -1230,6 +1265,9 @@ async def handle_download_choice(
             "Не получилось скачать 😔\n\n"
             f"Причина:\n{error_text[:2500]}"
         )
+
+    finally:
+        active_tasks.discard(task_key)
 
 
 def main() -> None:
