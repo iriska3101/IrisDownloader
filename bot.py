@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import tempfile
+import uuid
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,7 +51,7 @@ BROWSER_HEADERS = {
 @dataclass
 class AudioMetadata:
     title: str = "TikTok audio"
-    performer: str = "Неизвестен"
+    performer: str = "ÐÐµÐ¸Ð·Ð²ÐµÑÑÐµÐ½"
     cover_url: str | None = None
     referer: str | None = None
 
@@ -63,11 +64,12 @@ async def start(
         return
 
     await update.message.reply_text(
-        "Привет! 👋\n\n"
-        "Отправь мне ссылку, а затем выбери:\n"
-        "🎬 скачать видео\n"
-        "🎵 скачать звук в MP3\n"
-        "🖼 скачать фотографии"
+        "ÐÑÐ¸Ð²ÐµÑ! ð\n\n"
+        "ÐÑÐ¿ÑÐ°Ð²Ñ Ð¼Ð½Ðµ ÑÑÑÐ»ÐºÑ, Ð° Ð·Ð°ÑÐµÐ¼ Ð²ÑÐ±ÐµÑÐ¸:\n"
+        "ð¬ ÑÐºÐ°ÑÐ°ÑÑ Ð²Ð¸Ð´ÐµÐ¾\n"
+        "ðµ ÑÐºÐ°ÑÐ°ÑÑ Ð·Ð²ÑÐº Ð² MP3\n"
+        "ð¼ ÑÐºÐ°ÑÐ°ÑÑ ÑÐ¾ÑÐ¾Ð³ÑÐ°ÑÐ¸Ð¸\n\n"
+        "ÐÐ»Ð¸ Ð¿ÑÐ¾ÑÑÐ¾ Ð½Ð°Ð¿Ð¸ÑÐ¸ Ð½Ð°Ð·Ð²Ð°Ð½Ð¸Ðµ Ð¿ÐµÑÐ½Ð¸ â Ñ Ð¿Ð¾ÐºÐ°Ð¶Ñ 5 Ð²Ð°ÑÐ¸Ð°Ð½ÑÐ¾Ð²."
     )
 
 
@@ -471,7 +473,7 @@ def get_tiktok_post_assets(
         ),
         performer=clean_text(
             performer,
-            "Неизвестен",
+            "ÐÐµÐ¸Ð·Ð²ÐµÑÑÐµÐ½",
         ),
         cover_url=cover_url,
         referer=final_url,
@@ -496,7 +498,7 @@ def metadata_from_yt_dlp(
         or info.get("uploader")
         or info.get("channel")
         or info.get("uploader_id")
-        or "Неизвестен"
+        or "ÐÐµÐ¸Ð·Ð²ÐµÑÑÐµÐ½"
     )
 
     cover_url = info.get("thumbnail")
@@ -520,7 +522,7 @@ def metadata_from_yt_dlp(
         ),
         performer=clean_text(
             performer,
-            "Неизвестен",
+            "ÐÐµÐ¸Ð·Ð²ÐµÑÑÐµÐ½",
         ),
         cover_url=(
             cover_url
@@ -528,6 +530,68 @@ def metadata_from_yt_dlp(
             else None
         ),
     )
+
+
+def search_music_results(query: str) -> list[dict[str, str]]:
+    options: dict[str, Any] = {
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": True,
+        "skip_download": True,
+        "noplaylist": True,
+        "socket_timeout": 45,
+        "retries": 2,
+    }
+
+    with yt_dlp.YoutubeDL(options) as downloader:
+        info = downloader.extract_info(
+            f"ytsearch5:{query}",
+            download=False,
+        )
+
+    entries = info.get("entries") or []
+    results: list[dict[str, str]] = []
+
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+
+        webpage_url = (
+            entry.get("webpage_url")
+            or entry.get("url")
+        )
+
+        if not isinstance(webpage_url, str):
+            continue
+
+        if not webpage_url.startswith("http"):
+            webpage_url = (
+                "https://www.youtube.com/watch?v="
+                f"{webpage_url}"
+            )
+
+        title = clean_text(
+            entry.get("title"),
+            "ÐÐµÐ· Ð½Ð°Ð·Ð²Ð°Ð½Ð¸Ñ",
+            max_length=70,
+        )
+
+        uploader = clean_text(
+            entry.get("uploader")
+            or entry.get("channel"),
+            "",
+            max_length=45,
+        )
+
+        results.append(
+            {
+                "title": title,
+                "uploader": uploader,
+                "url": webpage_url,
+            }
+        )
+
+    return results
 
 
 def download_video(
@@ -617,7 +681,7 @@ def download_audio_source(
 
     if not candidates:
         raise FileNotFoundError(
-            "Исходная аудиодорожка не найдена"
+            "ÐÑÑÐ¾Ð´Ð½Ð°Ñ Ð°ÑÐ´Ð¸Ð¾Ð´Ð¾ÑÐ¾Ð¶ÐºÐ° Ð½Ðµ Ð½Ð°Ð¹Ð´ÐµÐ½Ð°"
         )
 
     return (
@@ -666,7 +730,7 @@ def download_direct_music(
 
     if path.stat().st_size < 5_000:
         raise RuntimeError(
-            "TikTok отдал слишком маленький музыкальный файл"
+            "TikTok Ð¾ÑÐ´Ð°Ð» ÑÐ»Ð¸ÑÐºÐ¾Ð¼ Ð¼Ð°Ð»ÐµÐ½ÑÐºÐ¸Ð¹ Ð¼ÑÐ·ÑÐºÐ°Ð»ÑÐ½ÑÐ¹ ÑÐ°Ð¹Ð»"
         )
 
     return path
@@ -841,7 +905,7 @@ def convert_to_mp3(
         error = (
             fallback.stderr.strip()
             or result.stderr.strip()
-            or "FFmpeg не смог создать MP3"
+            or "FFmpeg Ð½Ðµ ÑÐ¼Ð¾Ð³ ÑÐ¾Ð·Ð´Ð°ÑÑ MP3"
         )
 
         raise RuntimeError(error[-2000:])
@@ -869,8 +933,8 @@ def download_audio_as_mp3(
 
         if not music_url:
             raise RuntimeError(
-                "Не удалось найти музыку в фотопубликации.\n"
-                f"Обычная загрузка тоже не сработала: "
+                "ÐÐµ ÑÐ´Ð°Ð»Ð¾ÑÑ Ð½Ð°Ð¹ÑÐ¸ Ð¼ÑÐ·ÑÐºÑ Ð² ÑÐ¾ÑÐ¾Ð¿ÑÐ±Ð»Ð¸ÐºÐ°ÑÐ¸Ð¸.\n"
+                f"ÐÐ±ÑÑÐ½Ð°Ñ Ð·Ð°Ð³ÑÑÐ·ÐºÐ° ÑÐ¾Ð¶Ðµ Ð½Ðµ ÑÑÐ°Ð±Ð¾ÑÐ°Ð»Ð°: "
                 f"{normal_error}"
             ) from normal_error
 
@@ -908,7 +972,7 @@ def download_photos(
 
     if not photo_urls:
         raise RuntimeError(
-            "TikTok не отдал список фотографий."
+            "TikTok Ð½Ðµ Ð¾ÑÐ´Ð°Ð» ÑÐ¿Ð¸ÑÐ¾Ðº ÑÐ¾ÑÐ¾Ð³ÑÐ°ÑÐ¸Ð¹."
         )
 
     headers = {
@@ -960,7 +1024,7 @@ def download_photos(
 
     if not downloaded:
         raise RuntimeError(
-            "TikTok не разрешил скачать фотографии."
+            "TikTok Ð½Ðµ ÑÐ°Ð·ÑÐµÑÐ¸Ð» ÑÐºÐ°ÑÐ°ÑÑ ÑÐ¾ÑÐ¾Ð³ÑÐ°ÑÐ¸Ð¸."
         )
 
     return downloaded
@@ -1014,8 +1078,8 @@ async def run_with_retry(
             raise
 
         await status_message.edit_text(
-            "Первая попытка не удалась.\n"
-            "Повторяю ещё раз… 🔄"
+            "ÐÐµÑÐ²Ð°Ñ Ð¿Ð¾Ð¿ÑÑÐºÐ° Ð½Ðµ ÑÐ´Ð°Ð»Ð°ÑÑ.\n"
+            "ÐÐ¾Ð²ÑÐ¾ÑÑÑ ÐµÑÑ ÑÐ°Ð·â¦ ð"
         )
 
         await asyncio.sleep(3)
@@ -1026,36 +1090,29 @@ async def run_with_retry(
         )
 
 
-async def handle_link(
+async def show_link_menu(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
+    url: str,
 ) -> None:
     if update.message is None:
-        return
-
-    url = find_link(update.message.text or "")
-
-    if not url:
-        await update.message.reply_text(
-            "Пришли мне ссылку 🔗"
-        )
         return
 
     keyboard = InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
-                    "🎬 Видео",
+                    "ð¬ ÐÐ¸Ð´ÐµÐ¾",
                     callback_data="download_video",
                 ),
                 InlineKeyboardButton(
-                    "🎵 MP3",
+                    "ðµ MP3",
                     callback_data="download_audio",
                 ),
             ],
             [
                 InlineKeyboardButton(
-                    "🖼 Фотографии",
+                    "ð¼ Ð¤Ð¾ÑÐ¾Ð³ÑÐ°ÑÐ¸Ð¸",
                     callback_data="download_photos",
                 )
             ],
@@ -1063,13 +1120,117 @@ async def handle_link(
     )
 
     message = await update.message.reply_text(
-        "Что скачать?",
+        "Ð§ÑÐ¾ ÑÐºÐ°ÑÐ°ÑÑ?",
         reply_markup=keyboard,
     )
 
     context.user_data[
         f"url_{message.message_id}"
     ] = url
+
+
+async def search_music(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    query_text: str,
+) -> None:
+    if update.message is None:
+        return
+
+    status = await update.message.reply_text(
+        "ÐÑÑ Ð¼ÑÐ·ÑÐºÑâ¦ ð"
+    )
+
+    try:
+        results = await run_with_retry(
+            search_music_results,
+            query_text,
+            status_message=status,
+        )
+
+        if not results:
+            await status.edit_text(
+                "ÐÐ¸ÑÐµÐ³Ð¾ Ð½Ðµ Ð½Ð°ÑÐ»Ð° ð\n"
+                "ÐÐ¾Ð¿ÑÐ¾Ð±ÑÐ¹ Ð½Ð°Ð¿Ð¸ÑÐ°ÑÑ Ð½Ð°Ð·Ð²Ð°Ð½Ð¸Ðµ Ð¸ Ð¸ÑÐ¿Ð¾Ð»Ð½Ð¸ÑÐµÐ»Ñ ÑÐ¾ÑÐ½ÐµÐµ."
+            )
+            return
+
+        token = uuid.uuid4().hex[:10]
+        context.user_data[f"search_{token}"] = results
+
+        buttons: list[list[InlineKeyboardButton]] = []
+
+        for index, result in enumerate(results):
+            title = result["title"]
+            uploader = result["uploader"]
+
+            label = (
+                f"{index + 1}. {title}"
+                if not uploader
+                else f"{index + 1}. {title} â {uploader}"
+            )
+
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        label[:60],
+                        callback_data=(
+                            f"search_audio:{token}:{index}"
+                        ),
+                    )
+                ]
+            )
+
+        await status.edit_text(
+            "ÐÑÐ±ÐµÑÐ¸ Ð½ÑÐ¶Ð½ÑÐ¹ Ð²Ð°ÑÐ¸Ð°Ð½Ñ:",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    except Exception as error:
+        print(
+            f"Search error: {error}",
+            flush=True,
+        )
+
+        await status.edit_text(
+            "ÐÐµ Ð¿Ð¾Ð»ÑÑÐ¸Ð»Ð¾ÑÑ Ð²ÑÐ¿Ð¾Ð»Ð½Ð¸ÑÑ Ð¿Ð¾Ð¸ÑÐº ð\n\n"
+            f"ÐÑÐ¸ÑÐ¸Ð½Ð°:\n{str(error)[:1500]}"
+        )
+
+
+async def handle_text(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    if update.message is None:
+        return
+
+    text = (update.message.text or "").strip()
+
+    if not text:
+        return
+
+    url = find_link(text)
+
+    if url:
+        await show_link_menu(
+            update,
+            context,
+            url,
+        )
+        return
+
+    if len(text) < 2:
+        await update.message.reply_text(
+            "ÐÐ°Ð¿Ð¸ÑÐ¸ Ð½Ð°Ð·Ð²Ð°Ð½Ð¸Ðµ Ð¿ÐµÑÐ½Ð¸ Ð¸ Ð¸ÑÐ¿Ð¾Ð»Ð½Ð¸ÑÐµÐ»Ñ."
+        )
+        return
+
+    await search_music(
+        update,
+        context,
+        text,
+    )
 
 
 async def send_photo_albums(
@@ -1089,12 +1250,6 @@ async def send_photo_albums(
             with chunk[0].open("rb") as photo:
                 await message.reply_photo(
                     photo=photo,
-                    caption=(
-                        f"Готово 🖼\n"
-                        f"Фотографий: {len(photo_paths)}"
-                        if start_index == 0
-                        else None
-                    ),
                 )
 
             continue
@@ -1102,29 +1257,47 @@ async def send_photo_albums(
         with ExitStack() as stack:
             media: list[InputMediaPhoto] = []
 
-            for index, photo_path in enumerate(chunk):
+            for photo_path in chunk:
                 photo = stack.enter_context(
                     photo_path.open("rb")
                 )
 
-                caption = None
-
-                if start_index == 0 and index == 0:
-                    caption = (
-                        f"Готово 🖼\n"
-                        f"Фотографий: {len(photo_paths)}"
-                    )
-
                 media.append(
                     InputMediaPhoto(
                         media=photo,
-                        caption=caption,
                     )
                 )
 
             await message.reply_media_group(
                 media=media
             )
+
+
+async def send_mp3(
+    message,
+    mp3: Path,
+    metadata: AudioMetadata,
+    cover: Path | None,
+) -> None:
+    with ExitStack() as stack:
+        audio = stack.enter_context(
+            mp3.open("rb")
+        )
+
+        thumbnail = None
+
+        if cover and cover.exists():
+            thumbnail = stack.enter_context(
+                cover.open("rb")
+            )
+
+        await message.reply_audio(
+            audio=audio,
+            filename=f"{metadata.title[:50]}.mp3",
+            title=metadata.title,
+            performer=metadata.performer,
+            thumbnail=thumbnail,
+        )
 
 
 async def handle_download_choice(
@@ -1151,7 +1324,7 @@ async def handle_download_choice(
 
     if task_key in active_tasks:
         await query.answer(
-            "Загрузка уже выполняется ⏳",
+            "ÐÐ°Ð³ÑÑÐ·ÐºÐ° ÑÐ¶Ðµ Ð²ÑÐ¿Ð¾Ð»Ð½ÑÐµÑÑÑ â³",
             show_alert=True,
         )
         return
@@ -1162,22 +1335,22 @@ async def handle_download_choice(
 
     if not url:
         await query.edit_message_text(
-            "Ссылка устарела. Отправь её ещё раз."
+            "Ð¡ÑÑÐ»ÐºÐ° ÑÑÑÐ°ÑÐµÐ»Ð°. ÐÑÐ¿ÑÐ°Ð²Ñ ÐµÑ ÐµÑÑ ÑÐ°Ð·."
         )
         return
 
     active_tasks.add(task_key)
 
     loading_texts = {
-        "download_video": "Скачиваю видео… ⏳",
-        "download_audio": "Готовлю MP3… ⏳",
-        "download_photos": "Скачиваю фотографии… ⏳",
+        "download_video": "Ð¡ÐºÐ°ÑÐ¸Ð²Ð°Ñ Ð²Ð¸Ð´ÐµÐ¾â¦ â³",
+        "download_audio": "ÐÐ¾ÑÐ¾Ð²Ð»Ñ MP3â¦ â³",
+        "download_photos": "Ð¡ÐºÐ°ÑÐ¸Ð²Ð°Ñ ÑÐ¾ÑÐ¾Ð³ÑÐ°ÑÐ¸Ð¸â¦ â³",
     }
 
     await query.edit_message_text(
         loading_texts.get(
             query.data,
-            "Обрабатываю… ⏳",
+            "ÐÐ±ÑÐ°Ð±Ð°ÑÑÐ²Ð°Ñâ¦ â³",
         )
     )
 
@@ -1196,6 +1369,11 @@ async def handle_download_choice(
                     photos,
                 )
 
+                await message.edit_text(
+                    "â Ð¤Ð¾ÑÐ¾Ð³ÑÐ°ÑÐ¸Ð¸ ÑÑÐ¿ÐµÑÐ½Ð¾ ÑÐºÐ°ÑÐ°Ð½Ñ â "
+                    f"{len(photos)} ÑÑ."
+                )
+
             elif query.data == "download_audio":
                 (
                     mp3,
@@ -1208,28 +1386,16 @@ async def handle_download_choice(
                     status_message=message,
                 )
 
-                with ExitStack() as stack:
-                    audio = stack.enter_context(
-                        mp3.open("rb")
-                    )
+                await send_mp3(
+                    message,
+                    mp3,
+                    metadata,
+                    cover,
+                )
 
-                    thumbnail = None
-
-                    if cover and cover.exists():
-                        thumbnail = stack.enter_context(
-                            cover.open("rb")
-                        )
-
-                    await message.reply_audio(
-                        audio=audio,
-                        caption="MP3 готов 🎵",
-                        filename=(
-                            f"{metadata.title[:50]}.mp3"
-                        ),
-                        title=metadata.title,
-                        performer=metadata.performer,
-                        thumbnail=thumbnail,
-                    )
+                await message.edit_text(
+                    "â MP3 ÑÑÐ¿ÐµÑÐ½Ð¾ ÑÐºÐ°ÑÐ°Ð½ ðµ"
+                )
 
             else:
                 video = await run_with_retry(
@@ -1241,17 +1407,18 @@ async def handle_download_choice(
 
                 if not video.exists():
                     raise FileNotFoundError(
-                        "Скачанный файл не найден"
+                        "Ð¡ÐºÐ°ÑÐ°Ð½Ð½ÑÐ¹ ÑÐ°Ð¹Ð» Ð½Ðµ Ð½Ð°Ð¹Ð´ÐµÐ½"
                     )
 
                 with video.open("rb") as video_file:
                     await message.reply_video(
                         video=video_file,
-                        caption="Видео готово ✅",
                         supports_streaming=True,
                     )
 
-        await message.delete()
+                await message.edit_text(
+                    "â ÐÐ¸Ð´ÐµÐ¾ ÑÑÐ¿ÐµÑÐ½Ð¾ ÑÐºÐ°ÑÐ°Ð½Ð¾"
+                )
 
     except Exception as error:
         error_text = str(error)
@@ -1262,8 +1429,118 @@ async def handle_download_choice(
         )
 
         await message.edit_text(
-            "Не получилось скачать 😔\n\n"
-            f"Причина:\n{error_text[:2500]}"
+            "ÐÐµ Ð¿Ð¾Ð»ÑÑÐ¸Ð»Ð¾ÑÑ ÑÐºÐ°ÑÐ°ÑÑ ð\n\n"
+            f"ÐÑÐ¸ÑÐ¸Ð½Ð°:\n{error_text[:2500]}"
+        )
+
+    finally:
+        active_tasks.discard(task_key)
+
+
+async def handle_search_choice(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    query = update.callback_query
+
+    if query is None or query.message is None:
+        return
+
+    await query.answer()
+
+    message = query.message
+    callback_parts = (query.data or "").split(":")
+
+    if len(callback_parts) != 3:
+        await message.edit_text(
+            "ÐÐµ ÑÐ´Ð°Ð»Ð¾ÑÑ Ð¿ÑÐ¾ÑÐ¸ÑÐ°ÑÑ Ð²ÑÐ±ÑÐ°Ð½Ð½ÑÐ¹ ÑÐµÐ·ÑÐ»ÑÑÐ°Ñ."
+        )
+        return
+
+    _, token, index_text = callback_parts
+
+    try:
+        index = int(index_text)
+    except ValueError:
+        await message.edit_text(
+            "ÐÐµÐºÐ¾ÑÑÐµÐºÑÐ½ÑÐ¹ Ð½Ð¾Ð¼ÐµÑ ÑÐµÐ·ÑÐ»ÑÑÐ°ÑÐ°."
+        )
+        return
+
+    results = context.user_data.get(
+        f"search_{token}"
+    )
+
+    if (
+        not isinstance(results, list)
+        or index < 0
+        or index >= len(results)
+    ):
+        await message.edit_text(
+            "Ð ÐµÐ·ÑÐ»ÑÑÐ°ÑÑ Ð¿Ð¾Ð¸ÑÐºÐ° ÑÑÑÐ°ÑÐµÐ»Ð¸. "
+            "ÐÐ°Ð¿Ð¸ÑÐ¸ Ð½Ð°Ð·Ð²Ð°Ð½Ð¸Ðµ Ð¿ÐµÑÐ½Ð¸ ÐµÑÑ ÑÐ°Ð·."
+        )
+        return
+
+    selected = results[index]
+    url = selected["url"]
+
+    task_key = (
+        f"{message.chat_id}:"
+        f"{message.message_id}"
+    )
+
+    active_tasks: set[str] = context.bot_data.setdefault(
+        "active_tasks",
+        set(),
+    )
+
+    if task_key in active_tasks:
+        await query.answer(
+            "ÐÐ°Ð³ÑÑÐ·ÐºÐ° ÑÐ¶Ðµ Ð²ÑÐ¿Ð¾Ð»Ð½ÑÐµÑÑÑ â³",
+            show_alert=True,
+        )
+        return
+
+    active_tasks.add(task_key)
+
+    await message.edit_text(
+        "ÐÐ¾ÑÐ¾Ð²Ð»Ñ Ð²ÑÐ±ÑÐ°Ð½Ð½ÑÐ¹ MP3â¦ â³"
+    )
+
+    try:
+        with tempfile.TemporaryDirectory() as folder:
+            (
+                mp3,
+                metadata,
+                cover,
+            ) = await run_with_retry(
+                download_audio_as_mp3,
+                url,
+                folder,
+                status_message=message,
+            )
+
+            await send_mp3(
+                message,
+                mp3,
+                metadata,
+                cover,
+            )
+
+            await message.edit_text(
+                "â MP3 ÑÑÐ¿ÐµÑÐ½Ð¾ ÑÐºÐ°ÑÐ°Ð½ ðµ"
+            )
+
+    except Exception as error:
+        print(
+            f"Search download error: {error}",
+            flush=True,
+        )
+
+        await message.edit_text(
+            "ÐÐµ Ð¿Ð¾Ð»ÑÑÐ¸Ð»Ð¾ÑÑ ÑÐºÐ°ÑÐ°ÑÑ Ð²ÑÐ±ÑÐ°Ð½Ð½ÑÐ¹ ÑÑÐµÐº ð\n\n"
+            f"ÐÑÐ¸ÑÐ¸Ð½Ð°:\n{str(error)[:2500]}"
         )
 
     finally:
@@ -1284,7 +1561,7 @@ def main() -> None:
     application.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
-            handle_link,
+            handle_text,
         )
     )
 
@@ -1292,6 +1569,13 @@ def main() -> None:
         CallbackQueryHandler(
             handle_download_choice,
             pattern=r"^download_(video|audio|photos)$",
+        )
+    )
+
+    application.add_handler(
+        CallbackQueryHandler(
+            handle_search_choice,
+            pattern=r"^search_audio:[a-f0-9]{10}:\d+$",
         )
     )
 
