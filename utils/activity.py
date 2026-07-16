@@ -59,7 +59,7 @@ class ActivityIndicator:
             ]
 
             await self._safe_edit(
-                "🌸 IrisDownloader\n\n"
+                "🌸 IriSSave\n\n"
                 f"{frame} {self.text}"
             )
 

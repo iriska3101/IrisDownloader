@@ -16,7 +16,7 @@ async def process_video_download(
     progress = DownloadProgress(
         message=message,
         title=(
-            "🌸 IrisDownloader\n\n"
+            "🌸 IriSSave\n\n"
             "🎬 Скачиваю видео…"
         ),
     )
@@ -41,7 +41,7 @@ async def process_video_download(
         )
 
     await message.edit_text(
-        "🌸 IrisDownloader\n\n"
+        "🌸 IriSSave\n\n"
         "📤 Отправляю видео…"
     )
 
@@ -52,6 +52,6 @@ async def process_video_download(
         )
 
     await message.edit_text(
-        "🌸 IrisDownloader\n\n"
+        "🌸 IriSSave\n\n"
         "✅ Видео готово 🎬"
     )
