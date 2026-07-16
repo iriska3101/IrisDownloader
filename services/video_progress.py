@@ -1,5 +1,4 @@
 import os
-import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
@@ -9,20 +8,120 @@ import yt_dlp
 
 TELEGRAM_SAFE_SIZE = 48 * 1024 * 1024
 
+VIDEO_EXTENSIONS = {
+    ".mp4",
+    ".mov",
+    ".mkv",
+    ".webm",
+}
+
+
+def _print_available_formats(
+    info: dict[str, Any],
+) -> None:
+    """Печатает доступные форматы в Render Logs."""
+    print(
+        "\n========== AVAILABLE FORMATS ==========",
+        flush=True,
+    )
+
+    for item in info.get("formats") or []:
+        if not isinstance(item, dict):
+            continue
+
+        print(
+            "ID={format_id} | EXT={ext} | "
+            "SIZE={width}x{height} | "
+            "VCODEC={vcodec} | ACODEC={acodec} | "
+            "FPS={fps} | TBR={tbr} | "
+            "NOTE={format_note}".format(
+                format_id=item.get("format_id"),
+                ext=item.get("ext"),
+                width=item.get("width"),
+                height=item.get("height"),
+                vcodec=item.get("vcodec"),
+                acodec=item.get("acodec"),
+                fps=item.get("fps"),
+                tbr=item.get("tbr"),
+                format_note=item.get("format_note"),
+            ),
+            flush=True,
+        )
+
+    print(
+        "=======================================\n",
+        flush=True,
+    )
+
+
+def _print_selected_format(
+    info: dict[str, Any],
+) -> None:
+    """Печатает формат, который реально выбрал yt-dlp."""
+    requested_formats = (
+        info.get("requested_formats")
+        or []
+    )
+
+    if requested_formats:
+        print(
+            "========== SELECTED STREAMS ==========",
+            flush=True,
+        )
+
+        for item in requested_formats:
+            if not isinstance(item, dict):
+                continue
+
+            print(
+                "ID={format_id} | EXT={ext} | "
+                "SIZE={width}x{height} | "
+                "VCODEC={vcodec} | ACODEC={acodec}".format(
+                    format_id=item.get("format_id"),
+                    ext=item.get("ext"),
+                    width=item.get("width"),
+                    height=item.get("height"),
+                    vcodec=item.get("vcodec"),
+                    acodec=item.get("acodec"),
+                ),
+                flush=True,
+            )
+
+        print(
+            "======================================",
+            flush=True,
+        )
+
+    else:
+        print(
+            "SELECTED FORMAT: "
+            f"ID={info.get('format_id')} | "
+            f"EXT={info.get('ext')} | "
+            f"SIZE={info.get('width')}x{info.get('height')} | "
+            f"VCODEC={info.get('vcodec')} | "
+            f"ACODEC={info.get('acodec')}",
+            flush=True,
+        )
+
 
 def _find_downloaded_video(
     folder_path: Path,
     prepared_path: Path,
     files_before: set[Path],
 ) -> Path:
-    """Находит итоговый видеофайл после загрузки yt-dlp."""
-    mp4_path = prepared_path.with_suffix(".mp4")
+    """Находит конечный файл после загрузки или объединения."""
+    possible_paths = [
+        prepared_path.with_suffix(".mp4"),
+        prepared_path,
+    ]
 
-    if mp4_path.exists():
-        return mp4_path
-
-    if prepared_path.exists():
-        return prepared_path
+    for possible_path in possible_paths:
+        if (
+            possible_path.exists()
+            and possible_path.is_file()
+            and possible_path.stat().st_size > 0
+        ):
+            return possible_path
 
     candidates = [
         file
@@ -30,13 +129,8 @@ def _find_downloaded_video(
         if (
             file.is_file()
             and file.resolve() not in files_before
-            and file.suffix.lower()
-            in {
-                ".mp4",
-                ".mov",
-                ".mkv",
-                ".webm",
-            }
+            and file.suffix.lower() in VIDEO_EXTENSIONS
+            and file.stat().st_size > 0
         )
     ]
 
@@ -51,243 +145,40 @@ def _find_downloaded_video(
     )
 
 
-def _convert_instagram_for_iphone(
-    source_path: Path,
-) -> Path:
-    """
-    Полностью перекодирует Instagram-видео
-    в совместимый с Telegram и iPhone формат.
-    """
-    ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
-
-    output_path = source_path.with_name(
-        f"{source_path.stem}_instagram_fixed.mp4"
+def _has_audio(
+    info: dict[str, Any],
+) -> bool:
+    """Проверяет наличие звука в выбранном формате."""
+    requested_formats = (
+        info.get("requested_formats")
+        or []
     )
 
-    command = [
-        ffmpeg_path,
-        "-y",
+    if requested_formats:
+        for item in requested_formats:
+            if not isinstance(item, dict):
+                continue
 
-        # Создаём корректные временные метки.
-        "-fflags",
-        "+genpts",
+            audio_codec = str(
+                item.get("acodec") or ""
+            ).lower()
 
-        "-i",
-        str(source_path),
+            if audio_codec not in {
+                "",
+                "none",
+            }:
+                return True
 
-        # Берём первую видеодорожку и звук, если он есть.
-        "-map",
-        "0:v:0",
-        "-map",
-        "0:a:0?",
+        return False
 
-        # Не переносим подозрительные метаданные.
-        "-map_metadata",
-        "-1",
+    audio_codec = str(
+        info.get("acodec") or ""
+    ).lower()
 
-        # Полностью пересоздаём видеодорожку.
-        # Ограничиваем ширину до 720 px,
-        # сохраняя исходные пропорции.
-        "-vf",
-        (
-            "scale="
-            "'min(720,iw)':"
-            "-2:"
-            "flags=fast_bilinear,"
-            "setsar=1,"
-            "fps=30"
-        ),
-
-        # Максимально совместимый видеокодек.
-        "-c:v",
-        "libx264",
-        "-preset",
-        "ultrafast",
-        "-crf",
-        "28",
-        "-pix_fmt",
-        "yuv420p",
-        "-profile:v",
-        "main",
-        "-level",
-        "4.0",
-        "-threads",
-        "1",
-
-        # Совместимый звук.
-        "-c:a",
-        "aac",
-        "-b:a",
-        "128k",
-        "-ar",
-        "44100",
-        "-ac",
-        "2",
-
-        # Исправляем временные метки.
-        "-avoid_negative_ts",
-        "make_zero",
-
-        # Сбрасываем возможный неправильный поворот.
-        "-metadata:s:v:0",
-        "rotate=0",
-
-        # Размещаем служебную информацию MP4
-        # в начале файла.
-        "-movflags",
-        "+faststart",
-
-        # Убираем лишние дорожки.
-        "-sn",
-        "-dn",
-
-        str(output_path),
-    ]
-
-    print(
-        f"Converting Instagram video for iPhone: "
-        f"{source_path.name}",
-        flush=True,
-    )
-
-    result = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=600,
-    )
-
-    if result.returncode != 0:
-        print(
-            result.stderr[-6000:],
-            flush=True,
-        )
-
-        raise RuntimeError(
-            "Не удалось преобразовать Instagram-видео"
-        )
-
-    if (
-        not output_path.exists()
-        or output_path.stat().st_size == 0
-    ):
-        raise FileNotFoundError(
-            "Преобразованный видеофайл не найден"
-        )
-
-    print(
-        f"Instagram video ready: "
-        f"{output_path.name} | "
-        f"{output_path.stat().st_size} bytes",
-        flush=True,
-    )
-
-    try:
-        source_path.unlink()
-    except OSError:
-        pass
-
-    return output_path
-
-
-def _remux_other_video(
-    source_path: Path,
-) -> Path:
-    """
-    Быстро пересобирает контейнер остальных видео,
-    не перекодируя изображение.
-    """
-    ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
-
-    output_path = source_path.with_name(
-        f"{source_path.stem}_clean.mp4"
-    )
-
-    command = [
-        ffmpeg_path,
-        "-y",
-
-        "-fflags",
-        "+genpts",
-
-        "-i",
-        str(source_path),
-
-        "-map",
-        "0:v:0",
-        "-map",
-        "0:a:0?",
-
-        "-map_metadata",
-        "-1",
-
-        # Изображение не пережимаем.
-        "-c:v",
-        "copy",
-
-        # Звук приводим к AAC.
-        "-c:a",
-        "aac",
-        "-b:a",
-        "128k",
-        "-ar",
-        "44100",
-        "-ac",
-        "2",
-
-        "-avoid_negative_ts",
-        "make_zero",
-
-        "-metadata:s:v:0",
-        "rotate=0",
-
-        "-movflags",
-        "+faststart",
-
-        "-sn",
-        "-dn",
-
-        str(output_path),
-    ]
-
-    print(
-        f"Preparing video container: {source_path.name}",
-        flush=True,
-    )
-
-    result = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=300,
-    )
-
-    if result.returncode != 0:
-        print(
-            result.stderr[-5000:],
-            flush=True,
-        )
-
-        raise RuntimeError(
-            "Не удалось подготовить видео для Telegram"
-        )
-
-    if (
-        not output_path.exists()
-        or output_path.stat().st_size == 0
-    ):
-        raise FileNotFoundError(
-            "Подготовленный видеофайл не найден"
-        )
-
-    try:
-        source_path.unlink()
-    except OSError:
-        pass
-
-    return output_path
+    return audio_codec not in {
+        "",
+        "none",
+    }
 
 
 def download_video_with_progress(
@@ -296,11 +187,11 @@ def download_video_with_progress(
     progress_hook: Callable[[dict[str, Any]], None],
 ) -> Path:
     """
-    Скачивает видео со звуком.
+    Скачивает видео со звуком без перекодирования.
 
-    Instagram полностью преобразуется в H.264 + AAC.
-    Остальные сайты обрабатываются без тяжёлого
-    перекодирования изображения.
+    Сначала выбирает готовый MP4 со встроенным звуком.
+    Если такого файла нет, скачивает лучшую видеодорожку
+    и лучшую аудиодорожку и объединяет их в MP4.
     """
     folder_path = Path(folder)
     folder_path.mkdir(
@@ -321,28 +212,49 @@ def download_video_with_progress(
         if file.is_file()
     }
 
+    inspect_options: dict[str, Any] = {
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "socket_timeout": 120,
+        "retries": 5,
+        "fragment_retries": 5,
+    }
+
+    print(
+        f"Inspecting video: {url}",
+        flush=True,
+    )
+
+    with yt_dlp.YoutubeDL(
+        inspect_options
+    ) as inspector:
+        inspected_info = inspector.extract_info(
+            url,
+            download=False,
+        )
+
+    _print_available_formats(
+        inspected_info
+    )
+
     options: dict[str, Any] = {
         "outtmpl": template,
 
-        # В первую очередь выбираем H.264 со звуком.
+        # 1. Готовый MP4, где уже есть видео и звук.
+        # 2. Любой готовый файл с видео и звуком.
+        # 3. Отдельные видео + аудио.
+        # 4. Стандартный запасной вариант.
         "format": (
-            "best[ext=mp4]"
-            "[vcodec~='^(avc1|h264)']"
-            "[acodec!=none]/"
-
-            "bestvideo[ext=mp4]"
-            "[vcodec~='^(avc1|h264)']"
-            "+bestaudio[ext=m4a]/"
-
-            "bestvideo[ext=mp4]"
-            "[vcodec~='^(avc1|h264)']"
-            "+bestaudio/"
-
             "best[ext=mp4]"
             "[vcodec!=none]"
             "[acodec!=none]/"
 
-            "bestvideo+bestaudio/"
+            "best"
+            "[vcodec!=none]"
+            "[acodec!=none]/"
+
+            "bestvideo*+bestaudio/"
             "best"
         ),
 
@@ -362,18 +274,31 @@ def download_video_with_progress(
     }
 
     print(
-        f"Downloading video: {url}",
+        "Downloading original video with audio...",
         flush=True,
     )
 
-    with yt_dlp.YoutubeDL(options) as downloader:
-        info = downloader.extract_info(
+    with yt_dlp.YoutubeDL(
+        options
+    ) as downloader:
+        downloaded_info = downloader.extract_info(
             url,
             download=True,
         )
 
         prepared_path = Path(
-            downloader.prepare_filename(info)
+            downloader.prepare_filename(
+                downloaded_info
+            )
+        )
+
+    _print_selected_format(
+        downloaded_info
+    )
+
+    if not _has_audio(downloaded_info):
+        raise RuntimeError(
+            "Скачанный формат не содержит звука"
         )
 
     downloaded_path = _find_downloaded_video(
@@ -382,27 +307,19 @@ def download_video_with_progress(
         files_before=files_before,
     )
 
+    file_size = downloaded_path.stat().st_size
+
     print(
-        f"Downloaded file: {downloaded_path.name} | "
-        f"{downloaded_path.stat().st_size} bytes",
+        f"Final original video: "
+        f"{downloaded_path.name} | "
+        f"{file_size} bytes",
         flush=True,
     )
 
-    normalized_url = url.lower()
-
-    if "instagram.com" in normalized_url:
-        final_path = _convert_instagram_for_iphone(
-            downloaded_path
-        )
-    else:
-        final_path = _remux_other_video(
-            downloaded_path
-        )
-
-    if final_path.stat().st_size > TELEGRAM_SAFE_SIZE:
+    if file_size > TELEGRAM_SAFE_SIZE:
         raise RuntimeError(
             "Видео получилось больше 48 МБ. "
-            "Его пока нельзя отправить через Telegram."
+            "Telegram не разрешит боту отправить его."
         )
 
-    return final_path
+    return downloaded_path
