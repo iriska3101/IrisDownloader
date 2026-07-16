@@ -15,7 +15,7 @@ def _find_downloaded_video(
     prepared_path: Path,
     files_before: set[Path],
 ) -> Path:
-    """Находит готовый файл после загрузки yt-dlp."""
+    """Находит итоговый видеофайл после загрузки yt-dlp."""
     mp4_path = prepared_path.with_suffix(".mp4")
 
     if mp4_path.exists():
@@ -51,34 +51,31 @@ def _find_downloaded_video(
     )
 
 
-def _make_iphone_compatible_mp4(
+def _convert_instagram_for_iphone(
     source_path: Path,
 ) -> Path:
     """
-    Подготавливает MP4 для Telegram и iPhone.
-
-    Видео не перекодируется.
-    Звук преобразуется в AAC.
-    Исправляются временные метки и структура MP4.
+    Полностью перекодирует Instagram-видео
+    в совместимый с Telegram и iPhone формат.
     """
     ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
 
     output_path = source_path.with_name(
-        f"{source_path.stem}_iphone.mp4"
+        f"{source_path.stem}_instagram_fixed.mp4"
     )
 
     command = [
         ffmpeg_path,
         "-y",
 
-        # Создаём недостающие временные метки.
+        # Создаём корректные временные метки.
         "-fflags",
         "+genpts",
 
         "-i",
         str(source_path),
 
-        # Берём первую картинку и звук, если он есть.
+        # Берём первую видеодорожку и звук, если он есть.
         "-map",
         "0:v:0",
         "-map",
@@ -88,11 +85,36 @@ def _make_iphone_compatible_mp4(
         "-map_metadata",
         "-1",
 
-        # Картинку не пережимаем.
-        "-c:v",
-        "copy",
+        # Полностью пересоздаём видеодорожку.
+        # Ограничиваем ширину до 720 px,
+        # сохраняя исходные пропорции.
+        "-vf",
+        (
+            "scale="
+            "'min(720,iw)':"
+            "-2:"
+            "flags=fast_bilinear,"
+            "setsar=1,"
+            "fps=30"
+        ),
 
-        # Звук обязательно делаем совместимым с iPhone.
+        # Максимально совместимый видеокодек.
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-crf",
+        "28",
+        "-pix_fmt",
+        "yuv420p",
+        "-profile:v",
+        "main",
+        "-level",
+        "4.0",
+        "-threads",
+        "1",
+
+        # Совместимый звук.
         "-c:a",
         "aac",
         "-b:a",
@@ -102,20 +124,20 @@ def _make_iphone_compatible_mp4(
         "-ac",
         "2",
 
-        # Исправляем отрицательные временные метки.
+        # Исправляем временные метки.
         "-avoid_negative_ts",
         "make_zero",
 
-        # Убираем возможный неправильный поворот.
+        # Сбрасываем возможный неправильный поворот.
         "-metadata:s:v:0",
         "rotate=0",
 
-        # Начало файла переносится вперёд:
-        # Telegram и iPhone смогут нормально запускать ролик.
+        # Размещаем служебную информацию MP4
+        # в начале файла.
         "-movflags",
         "+faststart",
 
-        # Убираем субтитры и другие лишние дорожки.
+        # Убираем лишние дорожки.
         "-sn",
         "-dn",
 
@@ -123,8 +145,114 @@ def _make_iphone_compatible_mp4(
     ]
 
     print(
-        f"Preparing iPhone-compatible MP4: "
+        f"Converting Instagram video for iPhone: "
         f"{source_path.name}",
+        flush=True,
+    )
+
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=600,
+    )
+
+    if result.returncode != 0:
+        print(
+            result.stderr[-6000:],
+            flush=True,
+        )
+
+        raise RuntimeError(
+            "Не удалось преобразовать Instagram-видео"
+        )
+
+    if (
+        not output_path.exists()
+        or output_path.stat().st_size == 0
+    ):
+        raise FileNotFoundError(
+            "Преобразованный видеофайл не найден"
+        )
+
+    print(
+        f"Instagram video ready: "
+        f"{output_path.name} | "
+        f"{output_path.stat().st_size} bytes",
+        flush=True,
+    )
+
+    try:
+        source_path.unlink()
+    except OSError:
+        pass
+
+    return output_path
+
+
+def _remux_other_video(
+    source_path: Path,
+) -> Path:
+    """
+    Быстро пересобирает контейнер остальных видео,
+    не перекодируя изображение.
+    """
+    ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+
+    output_path = source_path.with_name(
+        f"{source_path.stem}_clean.mp4"
+    )
+
+    command = [
+        ffmpeg_path,
+        "-y",
+
+        "-fflags",
+        "+genpts",
+
+        "-i",
+        str(source_path),
+
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
+
+        "-map_metadata",
+        "-1",
+
+        # Изображение не пережимаем.
+        "-c:v",
+        "copy",
+
+        # Звук приводим к AAC.
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-ar",
+        "44100",
+        "-ac",
+        "2",
+
+        "-avoid_negative_ts",
+        "make_zero",
+
+        "-metadata:s:v:0",
+        "rotate=0",
+
+        "-movflags",
+        "+faststart",
+
+        "-sn",
+        "-dn",
+
+        str(output_path),
+    ]
+
+    print(
+        f"Preparing video container: {source_path.name}",
         flush=True,
     )
 
@@ -143,7 +271,7 @@ def _make_iphone_compatible_mp4(
         )
 
         raise RuntimeError(
-            "Не удалось подготовить видео для iPhone"
+            "Не удалось подготовить видео для Telegram"
         )
 
     if (
@@ -159,13 +287,6 @@ def _make_iphone_compatible_mp4(
     except OSError:
         pass
 
-    print(
-        f"iPhone-compatible MP4 ready: "
-        f"{output_path.name} | "
-        f"{output_path.stat().st_size} bytes",
-        flush=True,
-    )
-
     return output_path
 
 
@@ -175,8 +296,11 @@ def download_video_with_progress(
     progress_hook: Callable[[dict[str, Any]], None],
 ) -> Path:
     """
-    Скачивает видео со звуком и подготавливает
-    совместимый с Telegram и iPhone MP4.
+    Скачивает видео со звуком.
+
+    Instagram полностью преобразуется в H.264 + AAC.
+    Остальные сайты обрабатываются без тяжёлого
+    перекодирования изображения.
     """
     folder_path = Path(folder)
     folder_path.mkdir(
@@ -200,26 +324,25 @@ def download_video_with_progress(
     options: dict[str, Any] = {
         "outtmpl": template,
 
-        # Сначала выбираем готовый H.264 + AAC.
-        # Если его нет — скачиваем H.264 и M4A отдельно.
+        # В первую очередь выбираем H.264 со звуком.
         "format": (
             "best[ext=mp4]"
             "[vcodec~='^(avc1|h264)']"
-            "[acodec~='^(mp4a|aac)']/"
-            
+            "[acodec!=none]/"
+
             "bestvideo[ext=mp4]"
             "[vcodec~='^(avc1|h264)']"
             "+bestaudio[ext=m4a]/"
-            
-            "best[ext=mp4]"
-            "[vcodec~='^(avc1|h264)']"
-            "[acodec!=none]/"
-            
+
             "bestvideo[ext=mp4]"
             "[vcodec~='^(avc1|h264)']"
             "+bestaudio/"
-            
-            "best[ext=mp4]/"
+
+            "best[ext=mp4]"
+            "[vcodec!=none]"
+            "[acodec!=none]/"
+
+            "bestvideo+bestaudio/"
             "best"
         ),
 
@@ -265,17 +388,21 @@ def download_video_with_progress(
         flush=True,
     )
 
-    compatible_path = _make_iphone_compatible_mp4(
-        downloaded_path
-    )
+    normalized_url = url.lower()
 
-    if (
-        compatible_path.stat().st_size
-        > TELEGRAM_SAFE_SIZE
-    ):
+    if "instagram.com" in normalized_url:
+        final_path = _convert_instagram_for_iphone(
+            downloaded_path
+        )
+    else:
+        final_path = _remux_other_video(
+            downloaded_path
+        )
+
+    if final_path.stat().st_size > TELEGRAM_SAFE_SIZE:
         raise RuntimeError(
             "Видео получилось больше 48 МБ. "
             "Его пока нельзя отправить через Telegram."
         )
 
-    return compatible_path
+    return final_path
