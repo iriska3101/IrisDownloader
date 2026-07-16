@@ -7,17 +7,8 @@ import imageio_ffmpeg
 import yt_dlp
 
 
-PROBLEM_VIDEO_CODECS = (
-    "hevc",
-    "h265",
-    "hvc1",
-    "hev1",
-    "bytevc1",
-)
-
-
 def _print_formats(info: dict[str, Any]) -> None:
-    """Печатает доступные форматы ролика в Render Logs."""
+    """Печатает доступные форматы в Render Logs."""
     print(
         "\n========== AVAILABLE FORMATS ==========",
         flush=True,
@@ -26,16 +17,13 @@ def _print_formats(info: dict[str, Any]) -> None:
     for item in info.get("formats") or []:
         print(
             "ID={id} | EXT={ext} | SIZE={width}x{height} | "
-            "VCODEC={vcodec} | ACODEC={acodec} | "
-            "ABR={abr} | TBR={tbr}".format(
+            "VCODEC={vcodec} | ACODEC={acodec}".format(
                 id=item.get("format_id"),
                 ext=item.get("ext"),
                 width=item.get("width"),
                 height=item.get("height"),
                 vcodec=item.get("vcodec"),
                 acodec=item.get("acodec"),
-                abr=item.get("abr"),
-                tbr=item.get("tbr"),
             ),
             flush=True,
         )
@@ -46,101 +34,75 @@ def _print_formats(info: dict[str, Any]) -> None:
     )
 
 
-def _get_video_codec(info: dict[str, Any]) -> str:
-    """Определяет кодек выбранной видеодорожки."""
-    requested_formats = (
-        info.get("requested_formats")
-        or []
-    )
-
-    for item in requested_formats:
-        if not isinstance(item, dict):
-            continue
-
-        video_codec = str(
-            item.get("vcodec") or ""
-        ).lower()
-
-        if video_codec not in {
-            "",
-            "none",
-        }:
-            return video_codec
-
-    return str(
-        info.get("vcodec") or ""
-    ).lower()
-
-
-def _is_problem_codec(codec: str) -> bool:
-    """Проверяет, может ли Telegram неправильно показать кодек."""
-    normalized_codec = codec.lower()
-
-    return any(
-        marker in normalized_codec
-        for marker in PROBLEM_VIDEO_CODECS
-    )
-
-
-def _convert_hevc_to_h264(
+def _fix_tiktok_video(
     source_path: Path,
 ) -> Path:
     """
-    Переводит только проблемный HEVC-файл в H.264.
+    Исправляет растянутую картинку TikTok.
 
-    Видео уменьшается максимум до 720 пикселей по ширине,
-    чтобы не перегружать бесплатный Render.
+    Убирает неправильные метаданные,
+    сохраняет пропорции и переводит видео в H.264.
     """
     ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
 
-    converted_path = source_path.with_name(
-        f"{source_path.stem}_telegram.mp4"
+    fixed_path = source_path.with_name(
+        f"{source_path.stem}_fixed.mp4"
     )
 
     command = [
         ffmpeg_path,
         "-y",
+
         "-i",
         str(source_path),
 
+        # Берём первую видеодорожку и звук, если он есть.
         "-map",
         "0:v:0",
         "-map",
         "0:a:0?",
 
-        "-vf",
-        (
-            "scale="
-            "'min(720,iw)':"
-            "-2:"
-            "flags=fast_bilinear,"
-            "setsar=1"
-        ),
+        # Убираем подозрительные метаданные исходного файла.
+        "-map_metadata",
+        "-1",
 
+        # Сохраняем правильное соотношение сторон.
+        # Максимальная ширина — 720 пикселей.
+        "-vf",
+        "scale='min(720,iw)':-2:flags=fast_bilinear,"
+        "setsar=1",
+
+        # Совместимый с Telegram видеокодек.
         "-c:v",
         "libx264",
         "-preset",
         "ultrafast",
         "-crf",
-        "28",
+        "27",
         "-pix_fmt",
         "yuv420p",
         "-threads",
         "1",
 
+        # Сохраняем звук.
         "-c:a",
         "aac",
         "-b:a",
         "128k",
 
+        # Убираем метаданные поворота.
+        "-metadata:s:v:0",
+        "rotate=0",
+
+        # Видео сможет запускаться до полной загрузки.
         "-movflags",
         "+faststart",
 
-        str(converted_path),
+        str(fixed_path),
     ]
 
     print(
-        "Converting HEVC video to Telegram-compatible H.264...",
+        "Fixing TikTok proportions...",
         flush=True,
     )
 
@@ -153,26 +115,25 @@ def _convert_hevc_to_h264(
 
     if result.returncode != 0:
         print(
-            result.stderr[-3000:],
+            result.stderr[-4000:],
             flush=True,
         )
 
         raise RuntimeError(
-            "Не удалось исправить формат видео"
+            "Не удалось исправить пропорции видео"
         )
 
     if (
-        not converted_path.exists()
-        or converted_path.stat().st_size == 0
+        not fixed_path.exists()
+        or fixed_path.stat().st_size == 0
     ):
         raise FileNotFoundError(
             "Исправленный видеофайл не найден"
         )
 
     print(
-        f"Converted video ready: "
-        f"{converted_path.name} | "
-        f"{converted_path.stat().st_size} bytes",
+        f"Fixed TikTok video: {fixed_path.name} | "
+        f"{fixed_path.stat().st_size} bytes",
         flush=True,
     )
 
@@ -181,7 +142,7 @@ def _convert_hevc_to_h264(
     except OSError:
         pass
 
-    return converted_path
+    return fixed_path
 
 
 def download_video_with_progress(
@@ -192,8 +153,8 @@ def download_video_with_progress(
     """
     Скачивает видео со звуком.
 
-    Сначала выбирает H.264. Если TikTok предоставляет
-    только HEVC, конвертирует именно этот ролик в H.264.
+    TikTok дополнительно обрабатывается для правильного
+    отображения пропорций в Telegram.
     """
     folder_path = Path(folder)
     folder_path.mkdir(
@@ -239,10 +200,8 @@ def download_video_with_progress(
         "ffmpeg_location": ffmpeg_path,
         "merge_output_format": "mp4",
 
-        # Приоритет:
-        # 1. готовый H.264 MP4 со звуком;
-        # 2. отдельное H.264-видео + лучшая аудиодорожка;
-        # 3. любой файл со звуком как запасной вариант.
+        # Сначала готовое H.264-видео со звуком.
+        # Затем отдельные видео и аудиодорожка.
         "format": (
             "best[ext=mp4]"
             "[vcodec~='^(avc1|h264)']"
@@ -252,15 +211,8 @@ def download_video_with_progress(
             "[vcodec~='^(avc1|h264)']"
             "+bestaudio/"
 
-            "bestvideo"
-            "[vcodec~='^(avc1|h264)']"
-            "+bestaudio/"
-
-            "best[ext=mp4]"
-            "[vcodec!=none]"
-            "[acodec!=none]/"
-
             "bestvideo+bestaudio/"
+            "best[ext=mp4]/"
             "best"
         ),
 
@@ -309,8 +261,7 @@ def download_video_with_progress(
             for file in folder_path.iterdir()
             if (
                 file.is_file()
-                and file.resolve()
-                not in files_before
+                and file.resolve() not in files_before
                 and file.suffix.lower()
                 in {
                     ".mp4",
@@ -333,20 +284,16 @@ def download_video_with_progress(
             ),
         )
 
-    selected_codec = _get_video_codec(
-        downloaded_info
-    )
-
     print(
-        f"Selected video: "
-        f"{downloaded_path.name} | "
-        f"codec={selected_codec} | "
+        f"Selected video: {downloaded_path.name} | "
         f"{downloaded_path.stat().st_size} bytes",
         flush=True,
     )
 
-    if _is_problem_codec(selected_codec):
-        return _convert_hevc_to_h264(
+    normalized_url = url.lower()
+
+    if "tiktok.com" in normalized_url:
+        return _fix_tiktok_video(
             downloaded_path
         )
 
