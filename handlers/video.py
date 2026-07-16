@@ -31,7 +31,6 @@ async def process_video_download(
             progress.hook,
             status_message=message,
         )
-
     finally:
         await progress.stop()
 
@@ -45,15 +44,15 @@ async def process_video_download(
         "📤 Отправляю видео…"
     )
 
-with video_path.open("rb") as video_file:
-    await message.reply_video(
-        video=video_file,
-        supports_streaming=True,
-        write_timeout=300,
-        read_timeout=300,
-        connect_timeout=60,
-        pool_timeout=60,
-    )
+    with video_path.open("rb") as video_file:
+        await message.reply_video(
+            video=video_file,
+            supports_streaming=True,
+            write_timeout=300,
+            read_timeout=300,
+            connect_timeout=60,
+            pool_timeout=60,
+        )
 
     await message.edit_text(
         "⬇️ IriSSave\n\n"
