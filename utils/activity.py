@@ -59,7 +59,7 @@ class ActivityIndicator:
             ]
 
             await self._safe_edit(
-                "🌸 IriSSave\n\n"
+                "⬇️ IriSSave\n\n"
                 f"{frame} {self.text}"
             )
 

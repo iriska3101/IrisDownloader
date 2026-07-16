@@ -56,7 +56,7 @@ async def handle_download_choice(
 
     if not url:
         await message.edit_text(
-            "🌸 IriSSave\n\n"
+            "⬇️ IriSSave\n\n"
             "Ссылка устарела. Отправь её ещё раз."
         )
         return
@@ -107,7 +107,7 @@ async def handle_download_choice(
                 await indicator.stop()
 
                 await message.edit_text(
-                    "🌸 IriSSave\n\n"
+                    "⬇️ IriSSave\n\n"
                     "✅ Фотографии успешно скачаны — "
                     f"{len(photos)} шт."
                 )
@@ -142,7 +142,7 @@ async def handle_download_choice(
                 await indicator.stop()
 
                 await message.edit_text(
-                    "🌸 IriSSave\n\n"
+                    "⬇️ IriSSave\n\n"
                     "✅ MP3 готов к прослушиванию 🎵"
                 )
 
@@ -166,7 +166,7 @@ async def handle_download_choice(
         )
 
         await message.edit_text(
-            "🌸 IriSSave\n\n"
+            "⬇️ IriSSave\n\n"
             "❌ Не получилось скачать\n\n"
             f"Причина:\n{error_text[:2500]}"
         )
@@ -214,7 +214,7 @@ async def handle_search_choice(
 
     if len(callback_parts) != 3:
         await message.edit_text(
-            "🌸 IriSSave\n\n"
+            "⬇️ IriSSave\n\n"
             "Не удалось прочитать выбранный результат."
         )
         return
@@ -226,7 +226,7 @@ async def handle_search_choice(
 
     except ValueError:
         await message.edit_text(
-            "🌸 IriSSave\n\n"
+            "⬇️ IriSSave\n\n"
             "Некорректный номер результата."
         )
         return
@@ -241,7 +241,7 @@ async def handle_search_choice(
         or index >= len(results)
     ):
         await message.edit_text(
-            "🌸 IriSSave\n\n"
+            "⬇️ IriSSave\n\n"
             "Результаты поиска устарели.\n"
             "Напиши название песни ещё раз."
         )
@@ -290,7 +290,7 @@ async def handle_search_choice(
             await indicator.stop()
 
             await message.edit_text(
-                "🌸 IriSSave\n\n"
+                "⬇️ IriSSave\n\n"
                 "✅ MP3 готов к прослушиванию 🎵"
             )
 
@@ -305,7 +305,7 @@ async def handle_search_choice(
         )
 
         await message.edit_text(
-            "🌸 IriSSave\n\n"
+            "⬇️ IriSSave\n\n"
             "❌ Не получилось скачать трек\n\n"
             f"Причина:\n{error_text[:2500]}"
         )
