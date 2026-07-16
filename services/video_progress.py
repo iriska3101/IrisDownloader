@@ -1,70 +1,8 @@
 import os
-import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
-import imageio_ffmpeg
 import yt_dlp
-
-
-def _normalize_video(source_path: Path) -> Path:
-    """
-    Делает обычный MP4, который Telegram показывает без растяжения,
-    и сохраняет в нём звук.
-    """
-    ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
-    fixed_path = source_path.with_name(
-        f"{source_path.stem}_fixed.mp4"
-    )
-
-    command = [
-        ffmpeg_path,
-        "-y",
-        "-i",
-        str(source_path),
-        "-map",
-        "0:v:0",
-        "-map",
-        "0:a:0?",
-        "-vf",
-        "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-crf",
-        "22",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "128k",
-        "-movflags",
-        "+faststart",
-        str(fixed_path),
-    ]
-
-    result = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    if result.returncode != 0:
-        raise RuntimeError(
-            "Не удалось подготовить видео для Telegram:\n"
-            f"{result.stderr[-1500:]}"
-        )
-
-    if not fixed_path.exists():
-        raise FileNotFoundError(
-            "Исправленный видеофайл не найден"
-        )
-
-    if source_path.exists():
-        source_path.unlink()
-
-    return fixed_path
 
 
 def download_video_with_progress(
@@ -72,34 +10,39 @@ def download_video_with_progress(
     folder: str,
     progress_hook: Callable[[dict[str, Any]], None],
 ) -> Path:
-    """Скачивает видео со звуком и исправляет пропорции для Telegram."""
+    """
+    Скачивает готовое видео со звуком без тяжёлого
+    перекодирования через FFmpeg.
+    """
+    folder_path = Path(folder)
+    folder_path.mkdir(parents=True, exist_ok=True)
 
     template = os.path.join(
         folder,
         "%(title).80s-%(id)s.%(ext)s",
     )
 
-    ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+    files_before = {
+        file.resolve()
+        for file in folder_path.iterdir()
+        if file.is_file()
+    }
 
     options: dict[str, Any] = {
         "outtmpl": template,
 
-        # Берём лучшее видео и звук.
-        # Если они лежат отдельно, yt-dlp соединит их через FFmpeg.
+        # Выбираем один готовый MP4-файл,
+        # где уже одновременно есть видео и звук.
         "format": (
-            "bestvideo[ext=mp4]+bestaudio[ext=m4a]/"
-            "bestvideo+bestaudio/"
-            "best[ext=mp4]/best"
+            "best[ext=mp4][vcodec!=none][acodec!=none]/"
+            "best[vcodec!=none][acodec!=none]"
         ),
 
-        "merge_output_format": "mp4",
-        "ffmpeg_location": ffmpeg_path,
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
         "restrictfilenames": True,
 
-        # Даём TikTok больше времени на ответ.
         "socket_timeout": 120,
         "retries": 5,
         "fragment_retries": 5,
@@ -107,12 +50,10 @@ def download_video_with_progress(
         "progress_hooks": [progress_hook],
     }
 
-    folder_path = Path(folder)
-    files_before = {
-        file.resolve()
-        for file in folder_path.iterdir()
-        if file.is_file()
-    }
+    print(
+        f"Starting video download: {url}",
+        flush=True,
+    )
 
     with yt_dlp.YoutubeDL(options) as downloader:
         info = downloader.extract_info(
@@ -124,18 +65,18 @@ def download_video_with_progress(
             downloader.prepare_filename(info)
         )
 
-    possible_mp4_path = prepared_path.with_suffix(".mp4")
-
-    if possible_mp4_path.exists():
-        downloaded_path = possible_mp4_path
-    elif prepared_path.exists():
+    if prepared_path.exists():
         downloaded_path = prepared_path
     else:
         new_files = [
             file
             for file in folder_path.iterdir()
-            if file.is_file()
-            and file.resolve() not in files_before
+            if (
+                file.is_file()
+                and file.resolve() not in files_before
+                and file.suffix.lower()
+                in {".mp4", ".mov", ".mkv", ".webm"}
+            )
         ]
 
         if not new_files:
@@ -148,4 +89,10 @@ def download_video_with_progress(
             key=lambda item: item.stat().st_mtime,
         )
 
-    return _normalize_video(downloaded_path)
+    print(
+        f"Video ready: {downloaded_path} "
+        f"({downloaded_path.stat().st_size} bytes)",
+        flush=True,
+    )
+
+    return downloaded_path
