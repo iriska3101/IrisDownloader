@@ -7,46 +7,64 @@ import imageio_ffmpeg
 import yt_dlp
 
 
-def _print_formats(info: dict[str, Any]) -> None:
-    """Печатает доступные форматы в Render Logs."""
-    print(
-        "\n========== AVAILABLE FORMATS ==========",
-        flush=True,
-    )
+TELEGRAM_SAFE_SIZE = 48 * 1024 * 1024
 
-    for item in info.get("formats") or []:
-        print(
-            "ID={id} | EXT={ext} | SIZE={width}x{height} | "
-            "VCODEC={vcodec} | ACODEC={acodec}".format(
-                id=item.get("format_id"),
-                ext=item.get("ext"),
-                width=item.get("width"),
-                height=item.get("height"),
-                vcodec=item.get("vcodec"),
-                acodec=item.get("acodec"),
-            ),
-            flush=True,
+
+def _find_downloaded_file(
+    folder_path: Path,
+    prepared_path: Path,
+    files_before: set[Path],
+) -> Path:
+    """Находит итоговый видеофайл после загрузки и объединения."""
+
+    mp4_path = prepared_path.with_suffix(".mp4")
+
+    if mp4_path.exists():
+        return mp4_path
+
+    if prepared_path.exists():
+        return prepared_path
+
+    candidates = [
+        file
+        for file in folder_path.iterdir()
+        if (
+            file.is_file()
+            and file.resolve() not in files_before
+            and file.suffix.lower()
+            in {
+                ".mp4",
+                ".mov",
+                ".mkv",
+                ".webm",
+            }
+        )
+    ]
+
+    if not candidates:
+        raise FileNotFoundError(
+            "Скачанный видеофайл не найден"
         )
 
-    print(
-        "=======================================\n",
-        flush=True,
+    return max(
+        candidates,
+        key=lambda item: item.stat().st_mtime,
     )
 
 
-def _fix_tiktok_video(
+def _remux_to_clean_mp4(
     source_path: Path,
 ) -> Path:
     """
-    Исправляет растянутую картинку TikTok.
+    Пересобирает видео в чистый MP4 без перекодирования.
 
-    Убирает неправильные метаданные,
-    сохраняет пропорции и переводит видео в H.264.
+    Исправляет файлы, которые Telegram показывает,
+    но не может нормально воспроизвести или сохранить.
     """
     ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
 
-    fixed_path = source_path.with_name(
-        f"{source_path.stem}_fixed.mp4"
+    clean_path = source_path.with_name(
+        f"{source_path.stem}_clean.mp4"
     )
 
     command = [
@@ -56,53 +74,39 @@ def _fix_tiktok_video(
         "-i",
         str(source_path),
 
-        # Берём первую видеодорожку и звук, если он есть.
+        # Первая видеодорожка и первая аудиодорожка.
         "-map",
         "0:v:0",
         "-map",
         "0:a:0?",
 
-        # Убираем подозрительные метаданные исходного файла.
+        # Не переносим подозрительные метаданные.
         "-map_metadata",
         "-1",
 
-        # Сохраняем правильное соотношение сторон.
-        # Максимальная ширина — 720 пикселей.
-        "-vf",
-        "scale='min(720,iw)':-2:flags=fast_bilinear,"
-        "setsar=1",
-
-        # Совместимый с Telegram видеокодек.
+        # Не перекодируем — быстро и без нагрузки.
         "-c:v",
-        "libx264",
-        "-preset",
-        "ultrafast",
-        "-crf",
-        "27",
-        "-pix_fmt",
-        "yuv420p",
-        "-threads",
-        "1",
-
-        # Сохраняем звук.
+        "copy",
         "-c:a",
-        "aac",
-        "-b:a",
-        "128k",
+        "copy",
 
         # Убираем метаданные поворота.
         "-metadata:s:v:0",
         "rotate=0",
 
-        # Видео сможет запускаться до полной загрузки.
+        # Позволяет Telegram запускать видео сразу.
         "-movflags",
         "+faststart",
 
-        str(fixed_path),
+        # Не оставляем лишние дорожки.
+        "-sn",
+        "-dn",
+
+        str(clean_path),
     ]
 
     print(
-        "Fixing TikTok proportions...",
+        f"Cleaning MP4 container: {source_path.name}",
         flush=True,
     )
 
@@ -111,6 +115,7 @@ def _fix_tiktok_video(
         capture_output=True,
         text=True,
         check=False,
+        timeout=180,
     )
 
     if result.returncode != 0:
@@ -120,29 +125,29 @@ def _fix_tiktok_video(
         )
 
         raise RuntimeError(
-            "Не удалось исправить пропорции видео"
+            "Не удалось подготовить видео для Telegram"
         )
 
     if (
-        not fixed_path.exists()
-        or fixed_path.stat().st_size == 0
+        not clean_path.exists()
+        or clean_path.stat().st_size == 0
     ):
         raise FileNotFoundError(
-            "Исправленный видеофайл не найден"
+            "Подготовленный видеофайл не найден"
         )
-
-    print(
-        f"Fixed TikTok video: {fixed_path.name} | "
-        f"{fixed_path.stat().st_size} bytes",
-        flush=True,
-    )
 
     try:
         source_path.unlink()
     except OSError:
         pass
 
-    return fixed_path
+    print(
+        f"Clean MP4 ready: {clean_path.name} | "
+        f"{clean_path.stat().st_size} bytes",
+        flush=True,
+    )
+
+    return clean_path
 
 
 def download_video_with_progress(
@@ -151,10 +156,10 @@ def download_video_with_progress(
     progress_hook: Callable[[dict[str, Any]], None],
 ) -> Path:
     """
-    Скачивает видео со звуком.
+    Скачивает совместимое с Telegram видео со звуком.
 
-    TikTok дополнительно обрабатывается для правильного
-    отображения пропорций в Telegram.
+    После загрузки быстро пересобирает MP4-контейнер,
+    не перекодируя изображение.
     """
     folder_path = Path(folder)
     folder_path.mkdir(
@@ -169,39 +174,19 @@ def download_video_with_progress(
 
     ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
 
-    common_options: dict[str, Any] = {
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-        "socket_timeout": 120,
-        "retries": 5,
-        "fragment_retries": 5,
+    files_before = {
+        file.resolve()
+        for file in folder_path.iterdir()
+        if file.is_file()
     }
 
-    print(
-        f"Checking video formats: {url}",
-        flush=True,
-    )
-
-    with yt_dlp.YoutubeDL(
-        common_options
-    ) as inspector:
-        inspected_info = inspector.extract_info(
-            url,
-            download=False,
-        )
-
-    _print_formats(inspected_info)
-
     options: dict[str, Any] = {
-        **common_options,
-
         "outtmpl": template,
-        "ffmpeg_location": ffmpeg_path,
-        "merge_output_format": "mp4",
 
-        # Сначала готовое H.264-видео со звуком.
-        # Затем отдельные видео и аудиодорожка.
+        # Приоритет:
+        # 1. готовый MP4 H.264 со звуком;
+        # 2. H.264-видео + аудио M4A;
+        # 3. запасные варианты.
         "format": (
             "best[ext=mp4]"
             "[vcodec~='^(avc1|h264)']"
@@ -209,92 +194,72 @@ def download_video_with_progress(
 
             "bestvideo[ext=mp4]"
             "[vcodec~='^(avc1|h264)']"
+            "+bestaudio[ext=m4a]/"
+
+            "bestvideo[ext=mp4]"
+            "[vcodec~='^(avc1|h264)']"
             "+bestaudio/"
 
+            "best[ext=mp4]"
+            "[vcodec!=none]"
+            "[acodec!=none]/"
+
             "bestvideo+bestaudio/"
-            "best[ext=mp4]/"
             "best"
         ),
 
+        "merge_output_format": "mp4",
+        "ffmpeg_location": ffmpeg_path,
+
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
         "restrictfilenames": True,
+
+        "socket_timeout": 120,
+        "retries": 5,
+        "fragment_retries": 5,
+
         "progress_hooks": [progress_hook],
     }
 
-    files_before = {
-        file.resolve()
-        for file in folder_path.iterdir()
-        if file.is_file()
-    }
-
     print(
-        "Downloading preferred video and audio...",
+        f"Downloading video: {url}",
         flush=True,
     )
 
     with yt_dlp.YoutubeDL(
         options
     ) as downloader:
-        downloaded_info = downloader.extract_info(
+        info = downloader.extract_info(
             url,
             download=True,
         )
 
         prepared_path = Path(
-            downloader.prepare_filename(
-                downloaded_info
-            )
+            downloader.prepare_filename(info)
         )
 
-    possible_mp4_path = (
-        prepared_path.with_suffix(".mp4")
+    downloaded_path = _find_downloaded_file(
+        folder_path=folder_path,
+        prepared_path=prepared_path,
+        files_before=files_before,
     )
 
-    if possible_mp4_path.exists():
-        downloaded_path = possible_mp4_path
-
-    elif prepared_path.exists():
-        downloaded_path = prepared_path
-
-    else:
-        new_files = [
-            file
-            for file in folder_path.iterdir()
-            if (
-                file.is_file()
-                and file.resolve() not in files_before
-                and file.suffix.lower()
-                in {
-                    ".mp4",
-                    ".mov",
-                    ".mkv",
-                    ".webm",
-                }
-            )
-        ]
-
-        if not new_files:
-            raise FileNotFoundError(
-                "Скачанный видеофайл не найден"
-            )
-
-        downloaded_path = max(
-            new_files,
-            key=lambda item: (
-                item.stat().st_mtime
-            ),
-        )
-
     print(
-        f"Selected video: {downloaded_path.name} | "
+        f"Downloaded file: {downloaded_path.name} | "
         f"{downloaded_path.stat().st_size} bytes",
         flush=True,
     )
 
-    normalized_url = url.lower()
+    clean_path = _remux_to_clean_mp4(
+        downloaded_path
+    )
 
-    if "tiktok.com" in normalized_url:
-        return _fix_tiktok_video(
-            downloaded_path
+    if clean_path.stat().st_size > TELEGRAM_SAFE_SIZE:
+        raise RuntimeError(
+            "Видео получилось больше 48 МБ. "
+            "Этот ролик пока слишком большой для отправки."
         )
 
-    return downloaded_path
+    return clean_path
