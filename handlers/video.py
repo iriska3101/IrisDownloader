@@ -45,7 +45,7 @@ async def process_video_download(
         "📤 Отправляю видео…"
     )
 
-    with video_path.open("rb") as video_file:
+with video_path.open("rb") as video_file:
     await message.reply_video(
         video=video_file,
         supports_streaming=True,
