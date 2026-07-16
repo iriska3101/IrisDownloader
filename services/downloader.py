@@ -561,6 +561,13 @@ def download_audio_source(
     url: str,
     folder: str,
 ) -> tuple[Path, AudioMetadata]:
+    """
+    Скачивает только реальную аудиодорожку.
+
+    Если TikTok отдаёт видео без звука, функция специально
+    вызывает ошибку, чтобы бот перешёл к запасному способу
+    получения музыки напрямую со страницы TikTok.
+    """
     template = os.path.join(
         folder,
         "source-%(id)s.%(ext)s",
@@ -568,13 +575,18 @@ def download_audio_source(
 
     options: dict[str, Any] = {
         "outtmpl": template,
-        "format": "bestaudio/best",
+
+        # Только настоящий аудиопоток.
+        # Убираем /best, чтобы бот не скачивал немое видео.
+        "format": "bestaudio[acodec!=none]",
+
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
         "restrictfilenames": True,
-        "socket_timeout": 45,
-        "retries": 2,
+        "socket_timeout": 120,
+        "retries": 5,
+        "fragment_retries": 5,
     }
 
     with yt_dlp.YoutubeDL(
@@ -584,6 +596,39 @@ def download_audio_source(
             url,
             download=True,
         )
+
+        requested_downloads = (
+            info.get("requested_downloads")
+            or []
+        )
+
+        has_audio = False
+
+        for item in requested_downloads:
+            if not isinstance(item, dict):
+                continue
+
+            audio_codec = item.get("acodec")
+
+            if audio_codec not in {
+                None,
+                "none",
+            }:
+                has_audio = True
+                break
+
+        if not requested_downloads:
+            audio_codec = info.get("acodec")
+
+            has_audio = audio_codec not in {
+                None,
+                "none",
+            }
+
+        if not has_audio:
+            raise RuntimeError(
+                "TikTok не отдал аудиодорожку"
+            )
 
         downloaded_path = (
             downloader.prepare_filename(info)
@@ -598,8 +643,18 @@ def download_audio_source(
     candidates = [
         file
         for file in Path(folder).iterdir()
-        if file.is_file()
-        and file.suffix.lower() != ".mp3"
+        if (
+            file.is_file()
+            and file.suffix.lower()
+            in {
+                ".m4a",
+                ".mp3",
+                ".aac",
+                ".ogg",
+                ".opus",
+                ".webm",
+            }
+        )
     ]
 
     if not candidates:
@@ -616,7 +671,6 @@ def download_audio_source(
         ),
         metadata,
     )
-
 
 def download_direct_music(
     music_url: str,
