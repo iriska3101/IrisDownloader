@@ -8,10 +8,10 @@ from handlers.media import (
     send_mp3,
     send_photo_albums,
 )
+from handlers.video import process_video_download
 from services.downloader import (
     download_audio_as_mp3,
     download_photos,
-    download_video,
 )
 from utils.activity import ActivityIndicator
 from utils.retry import run_with_retry
@@ -143,45 +143,16 @@ async def handle_download_choice(
 
                 await message.edit_text(
                     "🌸 IrisDownloader\n\n"
-                    "✅ MP3 успешно скачан 🎵"
+                    "✅ MP3 готов к прослушиванию 🎵"
                 )
 
             else:
-                await indicator.change_text(
-                    "Скачиваю видео…"
-                )
-
-                video_path: Path = (
-                    await run_with_retry(
-                        download_video,
-                        url,
-                        folder,
-                        status_message=message,
-                    )
-                )
-
-                if not video_path.exists():
-                    raise FileNotFoundError(
-                        "Скачанный файл не найден"
-                    )
-
-                await indicator.change_text(
-                    "Отправляю видео…"
-                )
-
-                with video_path.open(
-                    "rb"
-                ) as video_file:
-                    await message.reply_video(
-                        video=video_file,
-                        supports_streaming=True,
-                    )
-
                 await indicator.stop()
 
-                await message.edit_text(
-                    "🌸 IrisDownloader\n\n"
-                    "✅ Видео успешно скачано"
+                await process_video_download(
+                    message=message,
+                    url=url,
+                    folder=folder,
                 )
 
     except Exception as error:
@@ -320,7 +291,7 @@ async def handle_search_choice(
 
             await message.edit_text(
                 "🌸 IrisDownloader\n\n"
-                "✅ MP3 успешно скачан 🎵"
+                "✅ MP3 готов к прослушиванию 🎵"
             )
 
     except Exception as error:
