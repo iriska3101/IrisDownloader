@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 from typing import Any, Callable
 
+import imageio_ffmpeg
 import yt_dlp
 
 
@@ -11,8 +12,8 @@ def download_video_with_progress(
     progress_hook: Callable[[dict[str, Any]], None],
 ) -> Path:
     """
-    Скачивает готовое видео со звуком без тяжёлого
-    перекодирования через FFmpeg.
+    Скачивает видео и звук отдельно, если это нужно,
+    а затем быстро объединяет их без перекодирования.
     """
     folder_path = Path(folder)
     folder_path.mkdir(parents=True, exist_ok=True)
@@ -21,6 +22,8 @@ def download_video_with_progress(
         folder,
         "%(title).80s-%(id)s.%(ext)s",
     )
+
+    ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
 
     files_before = {
         file.resolve()
@@ -31,12 +34,15 @@ def download_video_with_progress(
     options: dict[str, Any] = {
         "outtmpl": template,
 
-        # Выбираем один готовый MP4-файл,
-        # где уже одновременно есть видео и звук.
         "format": (
+            "bestvideo[ext=mp4]+bestaudio[ext=m4a]/"
+            "bestvideo+bestaudio/"
             "best[ext=mp4][vcodec!=none][acodec!=none]/"
             "best[vcodec!=none][acodec!=none]"
         ),
+
+        "merge_output_format": "mp4",
+        "ffmpeg_location": ffmpeg_path,
 
         "noplaylist": True,
         "quiet": True,
@@ -65,7 +71,11 @@ def download_video_with_progress(
             downloader.prepare_filename(info)
         )
 
-    if prepared_path.exists():
+    mp4_path = prepared_path.with_suffix(".mp4")
+
+    if mp4_path.exists():
+        downloaded_path = mp4_path
+    elif prepared_path.exists():
         downloaded_path = prepared_path
     else:
         new_files = [
