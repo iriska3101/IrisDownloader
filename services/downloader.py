@@ -562,11 +562,11 @@ def download_audio_source(
     folder: str,
 ) -> tuple[Path, AudioMetadata]:
     """
-    Скачивает только реальную аудиодорожку.
+    Скачивает источник с настоящей аудиодорожкой.
 
-    Если TikTok отдаёт видео без звука, функция специально
-    вызывает ошибку, чтобы бот перешёл к запасному способу
-    получения музыки напрямую со страницы TikTok.
+    Сначала пробует отдельный аудиопоток.
+    Если его нет, скачивает видео со встроенным звуком,
+    из которого FFmpeg затем извлечёт MP3.
     """
     template = os.path.join(
         folder,
@@ -576,9 +576,14 @@ def download_audio_source(
     options: dict[str, Any] = {
         "outtmpl": template,
 
-        # Только настоящий аудиопоток.
-        # Убираем /best, чтобы бот не скачивал немое видео.
-        "format": "bestaudio[acodec!=none]",
+        # 1. Отдельная аудиодорожка.
+        # 2. Готовый файл со звуком.
+        # 3. Любой формат, содержащий аудио.
+        "format": (
+            "bestaudio[acodec!=none]/"
+            "best[ext=mp4][acodec!=none]/"
+            "best[acodec!=none]"
+        ),
 
         "noplaylist": True,
         "quiet": True,
@@ -588,6 +593,97 @@ def download_audio_source(
         "retries": 5,
         "fragment_retries": 5,
     }
+
+    files_before = {
+        file.resolve()
+        for file in Path(folder).iterdir()
+        if file.is_file()
+    }
+
+    with yt_dlp.YoutubeDL(options) as downloader:
+        info = downloader.extract_info(
+            url,
+            download=True,
+        )
+
+        requested_downloads = (
+            info.get("requested_downloads")
+            or []
+        )
+
+        has_audio = False
+
+        for item in requested_downloads:
+            if not isinstance(item, dict):
+                continue
+
+            audio_codec = str(
+                item.get("acodec") or ""
+            ).lower()
+
+            if audio_codec not in {
+                "",
+                "none",
+            }:
+                has_audio = True
+                break
+
+        if not requested_downloads:
+            audio_codec = str(
+                info.get("acodec") or ""
+            ).lower()
+
+            has_audio = audio_codec not in {
+                "",
+                "none",
+            }
+
+        if not has_audio:
+            raise RuntimeError(
+                "В публикации не найдена аудиодорожка"
+            )
+
+        prepared_path = Path(
+            downloader.prepare_filename(info)
+        )
+
+    metadata = metadata_from_yt_dlp(info)
+
+    if prepared_path.exists():
+        return prepared_path, metadata
+
+    new_files = [
+        file
+        for file in Path(folder).iterdir()
+        if (
+            file.is_file()
+            and file.resolve() not in files_before
+            and file.suffix.lower()
+            in {
+                ".m4a",
+                ".mp3",
+                ".aac",
+                ".ogg",
+                ".opus",
+                ".webm",
+                ".mp4",
+                ".mov",
+                ".mkv",
+            }
+        )
+    ]
+
+    if not new_files:
+        raise FileNotFoundError(
+            "Файл с аудиодорожкой не найден"
+        )
+
+    source_path = max(
+        new_files,
+        key=lambda item: item.stat().st_mtime,
+    )
+
+    return source_path, metadata
 
     with yt_dlp.YoutubeDL(
         options
