@@ -13,6 +13,7 @@ from services.downloader import (
     download_photos,
     download_video,
 )
+from utils.activity import ActivityIndicator
 from utils.retry import run_with_retry
 
 
@@ -20,13 +21,11 @@ async def handle_download_choice(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    """Обрабатывает кнопки: видео, MP3 и фотографии."""
+    """Обрабатывает кнопки видео, MP3 и фотографий."""
     query = update.callback_query
 
     if query is None or query.message is None:
         return
-
-    await query.answer()
 
     message = query.message
 
@@ -49,41 +48,44 @@ async def handle_download_choice(
         )
         return
 
+    await query.answer()
+
     url = context.user_data.get(
         f"url_{message.message_id}"
     )
 
     if not url:
-        await query.edit_message_text(
-            "Ссылка устарела. "
-            "Отправь её ещё раз."
+        await message.edit_text(
+            "🌸 IrisDownloader\n\n"
+            "Ссылка устарела. Отправь её ещё раз."
         )
         return
 
     active_tasks.add(task_key)
 
-    loading_texts = {
-        "download_video": (
-            "Скачиваю видео… ⏳"
-        ),
-        "download_audio": (
-            "Готовлю MP3… ⏳"
-        ),
-        "download_photos": (
-            "Скачиваю фотографии… ⏳"
-        ),
+    activity_texts = {
+        "download_video": "Подготавливаю видео…",
+        "download_audio": "Подготавливаю MP3…",
+        "download_photos": "Ищу фотографии…",
     }
 
-    await query.edit_message_text(
-        loading_texts.get(
+    indicator = ActivityIndicator(
+        message=message,
+        text=activity_texts.get(
             query.data,
-            "Обрабатываю… ⏳",
-        )
+            "Обрабатываю запрос…",
+        ),
     )
+
+    await indicator.start()
 
     try:
         with tempfile.TemporaryDirectory() as folder:
             if query.data == "download_photos":
+                await indicator.change_text(
+                    "Скачиваю фотографии…"
+                )
+
                 photos: list[Path] = (
                     await run_with_retry(
                         download_photos,
@@ -93,17 +95,28 @@ async def handle_download_choice(
                     )
                 )
 
+                await indicator.change_text(
+                    "Отправляю фотографии…"
+                )
+
                 await send_photo_albums(
                     message,
                     photos,
                 )
 
+                await indicator.stop()
+
                 await message.edit_text(
-                    "✅ Фотографии успешно "
-                    f"скачаны — {len(photos)} шт."
+                    "🌸 IrisDownloader\n\n"
+                    "✅ Фотографии успешно скачаны — "
+                    f"{len(photos)} шт."
                 )
 
             elif query.data == "download_audio":
+                await indicator.change_text(
+                    "Скачиваю и преобразую звук в MP3…"
+                )
+
                 (
                     mp3_path,
                     metadata,
@@ -115,6 +128,10 @@ async def handle_download_choice(
                     status_message=message,
                 )
 
+                await indicator.change_text(
+                    "Добавляю название и обложку…"
+                )
+
                 await send_mp3(
                     message,
                     mp3_path,
@@ -122,11 +139,18 @@ async def handle_download_choice(
                     cover_path,
                 )
 
+                await indicator.stop()
+
                 await message.edit_text(
+                    "🌸 IrisDownloader\n\n"
                     "✅ MP3 успешно скачан 🎵"
                 )
 
             else:
+                await indicator.change_text(
+                    "Скачиваю видео…"
+                )
+
                 video_path: Path = (
                     await run_with_retry(
                         download_video,
@@ -141,6 +165,10 @@ async def handle_download_choice(
                         "Скачанный файл не найден"
                     )
 
+                await indicator.change_text(
+                    "Отправляю видео…"
+                )
+
                 with video_path.open(
                     "rb"
                 ) as video_file:
@@ -149,11 +177,16 @@ async def handle_download_choice(
                         supports_streaming=True,
                     )
 
+                await indicator.stop()
+
                 await message.edit_text(
+                    "🌸 IrisDownloader\n\n"
                     "✅ Видео успешно скачано"
                 )
 
     except Exception as error:
+        await indicator.stop()
+
         error_text = str(error)
 
         print(
@@ -162,7 +195,8 @@ async def handle_download_choice(
         )
 
         await message.edit_text(
-            "Не получилось скачать 😔\n\n"
+            "🌸 IrisDownloader\n\n"
+            "❌ Не получилось скачать\n\n"
             f"Причина:\n{error_text[:2500]}"
         )
 
@@ -180,49 +214,7 @@ async def handle_search_choice(
     if query is None or query.message is None:
         return
 
-    await query.answer()
-
     message = query.message
-
-    callback_parts = (
-        query.data or ""
-    ).split(":")
-
-    if len(callback_parts) != 3:
-        await message.edit_text(
-            "Не удалось прочитать "
-            "выбранный результат."
-        )
-        return
-
-    _, token, index_text = callback_parts
-
-    try:
-        index = int(index_text)
-
-    except ValueError:
-        await message.edit_text(
-            "Некорректный номер результата."
-        )
-        return
-
-    results = context.user_data.get(
-        f"search_{token}"
-    )
-
-    if (
-        not isinstance(results, list)
-        or index < 0
-        or index >= len(results)
-    ):
-        await message.edit_text(
-            "Результаты поиска устарели. "
-            "Напиши название песни ещё раз."
-        )
-        return
-
-    selected = results[index]
-    url = selected["url"]
 
     task_key = (
         f"{message.chat_id}:"
@@ -243,14 +235,65 @@ async def handle_search_choice(
         )
         return
 
+    await query.answer()
+
+    callback_parts = (
+        query.data or ""
+    ).split(":")
+
+    if len(callback_parts) != 3:
+        await message.edit_text(
+            "🌸 IrisDownloader\n\n"
+            "Не удалось прочитать выбранный результат."
+        )
+        return
+
+    _, token, index_text = callback_parts
+
+    try:
+        index = int(index_text)
+
+    except ValueError:
+        await message.edit_text(
+            "🌸 IrisDownloader\n\n"
+            "Некорректный номер результата."
+        )
+        return
+
+    results = context.user_data.get(
+        f"search_{token}"
+    )
+
+    if (
+        not isinstance(results, list)
+        or index < 0
+        or index >= len(results)
+    ):
+        await message.edit_text(
+            "🌸 IrisDownloader\n\n"
+            "Результаты поиска устарели.\n"
+            "Напиши название песни ещё раз."
+        )
+        return
+
+    selected = results[index]
+    url = selected["url"]
+
     active_tasks.add(task_key)
 
-    await message.edit_text(
-        "Готовлю выбранный MP3… ⏳"
+    indicator = ActivityIndicator(
+        message=message,
+        text="Подготавливаю выбранный MP3…",
     )
+
+    await indicator.start()
 
     try:
         with tempfile.TemporaryDirectory() as folder:
+            await indicator.change_text(
+                "Скачиваю аудиодорожку…"
+            )
+
             (
                 mp3_path,
                 metadata,
@@ -262,6 +305,10 @@ async def handle_search_choice(
                 status_message=message,
             )
 
+            await indicator.change_text(
+                "Добавляю название и обложку…"
+            )
+
             await send_mp3(
                 message,
                 mp3_path,
@@ -269,22 +316,26 @@ async def handle_search_choice(
                 cover_path,
             )
 
+            await indicator.stop()
+
             await message.edit_text(
+                "🌸 IrisDownloader\n\n"
                 "✅ MP3 успешно скачан 🎵"
             )
 
     except Exception as error:
+        await indicator.stop()
+
         error_text = str(error)
 
         print(
-            "Search download error: "
-            f"{error_text}",
+            f"Search download error: {error_text}",
             flush=True,
         )
 
         await message.edit_text(
-            "Не получилось скачать "
-            "выбранный трек 😔\n\n"
+            "🌸 IrisDownloader\n\n"
+            "❌ Не получилось скачать трек\n\n"
             f"Причина:\n{error_text[:2500]}"
         )
 
