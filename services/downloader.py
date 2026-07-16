@@ -1040,28 +1040,48 @@ def download_audio_as_mp3(
     AudioMetadata,
     Path | None,
 ]:
+    """
+    Создаёт MP3 из видео или отдельной аудиодорожки.
+
+    Поиск прямой музыки со страницы используется
+    только для TikTok-фотопубликаций.
+    """
     try:
-        source, metadata = (
-            download_audio_source(
-                url,
-                folder,
-            )
+        source, metadata = download_audio_source(
+            url,
+            folder,
         )
 
     except Exception as normal_error:
+        normalized_url = url.lower()
+
+        # Запасной способ с музыкой фотопубликации
+        # применим только к TikTok.
+        if "tiktok.com" not in normalized_url:
+            raise RuntimeError(
+                "Не удалось получить звуковую дорожку "
+                "из этой публикации.\n"
+                f"Причина: {normal_error}"
+            ) from normal_error
+
         (
-            _,
+            photo_urls,
             music_url,
             final_url,
             metadata,
         ) = get_tiktok_post_assets(url)
 
+        if not photo_urls:
+            raise RuntimeError(
+                "Не удалось получить звуковую дорожку "
+                "из видео.\n"
+                f"Причина: {normal_error}"
+            ) from normal_error
+
         if not music_url:
             raise RuntimeError(
-                "Не удалось найти музыку "
-                "в фотопубликации.\n"
-                "Обычная загрузка тоже "
-                "не сработала: "
+                "В фотопубликации не удалось найти музыку.\n"
+                f"Обычная загрузка тоже не сработала: "
                 f"{normal_error}"
             ) from normal_error
 
