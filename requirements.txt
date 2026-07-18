@@ -1,4 +1,4 @@
 python-telegram-bot[webhooks]==22.5
-yt-dlp>=2025.7.21
+yt-dlp[default] @ https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/yt-dlp.tar.gz
 httpx
 imageio-ffmpeg==0.6.0
