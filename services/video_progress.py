@@ -1,4 +1,5 @@
 import os
+import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
@@ -13,95 +14,8 @@ VIDEO_EXTENSIONS = {
     ".mov",
     ".mkv",
     ".webm",
+    ".m4v",
 }
-
-
-def _print_available_formats(
-    info: dict[str, Any],
-) -> None:
-    """Печатает доступные форматы в Render Logs."""
-    print(
-        "\n========== AVAILABLE FORMATS ==========",
-        flush=True,
-    )
-
-    for item in info.get("formats") or []:
-        if not isinstance(item, dict):
-            continue
-
-        print(
-            "ID={format_id} | EXT={ext} | "
-            "SIZE={width}x{height} | "
-            "VCODEC={vcodec} | ACODEC={acodec} | "
-            "FPS={fps} | TBR={tbr} | "
-            "NOTE={format_note}".format(
-                format_id=item.get("format_id"),
-                ext=item.get("ext"),
-                width=item.get("width"),
-                height=item.get("height"),
-                vcodec=item.get("vcodec"),
-                acodec=item.get("acodec"),
-                fps=item.get("fps"),
-                tbr=item.get("tbr"),
-                format_note=item.get("format_note"),
-            ),
-            flush=True,
-        )
-
-    print(
-        "=======================================\n",
-        flush=True,
-    )
-
-
-def _print_selected_format(
-    info: dict[str, Any],
-) -> None:
-    """Печатает формат, который реально выбрал yt-dlp."""
-    requested_formats = (
-        info.get("requested_formats")
-        or []
-    )
-
-    if requested_formats:
-        print(
-            "========== SELECTED STREAMS ==========",
-            flush=True,
-        )
-
-        for item in requested_formats:
-            if not isinstance(item, dict):
-                continue
-
-            print(
-                "ID={format_id} | EXT={ext} | "
-                "SIZE={width}x{height} | "
-                "VCODEC={vcodec} | ACODEC={acodec}".format(
-                    format_id=item.get("format_id"),
-                    ext=item.get("ext"),
-                    width=item.get("width"),
-                    height=item.get("height"),
-                    vcodec=item.get("vcodec"),
-                    acodec=item.get("acodec"),
-                ),
-                flush=True,
-            )
-
-        print(
-            "======================================",
-            flush=True,
-        )
-
-    else:
-        print(
-            "SELECTED FORMAT: "
-            f"ID={info.get('format_id')} | "
-            f"EXT={info.get('ext')} | "
-            f"SIZE={info.get('width')}x{info.get('height')} | "
-            f"VCODEC={info.get('vcodec')} | "
-            f"ACODEC={info.get('acodec')}",
-            flush=True,
-        )
 
 
 def _find_downloaded_video(
@@ -109,9 +23,14 @@ def _find_downloaded_video(
     prepared_path: Path,
     files_before: set[Path],
 ) -> Path:
-    """Находит конечный файл после загрузки или объединения."""
+    """
+    Находит реальный итоговый файл после скачивания
+    и объединения потоков yt-dlp.
+    """
     possible_paths = [
         prepared_path.with_suffix(".mp4"),
+        prepared_path.with_suffix(".mkv"),
+        prepared_path.with_suffix(".webm"),
         prepared_path,
     ]
 
@@ -141,16 +60,22 @@ def _find_downloaded_video(
 
     return max(
         candidates,
-        key=lambda item: item.stat().st_mtime,
+        key=lambda item: (
+            item.stat().st_mtime,
+            item.stat().st_size,
+        ),
     )
 
 
-def _has_audio(
+def _has_audio_stream(
     info: dict[str, Any],
 ) -> bool:
-    """Проверяет наличие звука в выбранном формате."""
+    """
+    Проверяет, выбрал ли yt-dlp хотя бы один поток со звуком.
+    """
     requested_formats = (
         info.get("requested_formats")
+        or info.get("requested_downloads")
         or []
     )
 
@@ -169,8 +94,6 @@ def _has_audio(
             }:
                 return True
 
-        return False
-
     audio_codec = str(
         info.get("acodec") or ""
     ).lower()
@@ -181,17 +104,195 @@ def _has_audio(
     }
 
 
+def _normalize_video(
+    source_path: Path,
+    folder_path: Path,
+) -> Path:
+    """
+    Создаёт Telegram-совместимый MP4:
+
+    - H.264;
+    - AAC;
+    - правильное соотношение пикселей;
+    - чётные размеры;
+    - faststart для потокового воспроизведения.
+    """
+    ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+
+    output_path = (
+        folder_path
+        / "IriSSave_video.mp4"
+    )
+
+    command = [
+        ffmpeg_path,
+        "-y",
+        "-i",
+        str(source_path),
+
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
+
+        "-vf",
+        (
+            "setsar=1,"
+            "scale="
+            "trunc(iw/2)*2:"
+            "trunc(ih/2)*2"
+        ),
+
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
+        "-pix_fmt",
+        "yuv420p",
+
+        "-c:a",
+        "aac",
+        "-b:a",
+        "160k",
+        "-ar",
+        "48000",
+
+        "-movflags",
+        "+faststart",
+
+        "-max_muxing_queue_size",
+        "4096",
+
+        str(output_path),
+    ]
+
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=900,
+        check=False,
+    )
+
+    if (
+        result.returncode != 0
+        or not output_path.exists()
+        or output_path.stat().st_size == 0
+    ):
+        error = (
+            result.stderr.strip()
+            or "FFmpeg не смог обработать видео"
+        )
+
+        raise RuntimeError(
+            "Не удалось подготовить видео "
+            "для Telegram.\n"
+            f"Причина: {error[-1800:]}"
+        )
+
+    return output_path
+
+
+def _create_smaller_video(
+    source_path: Path,
+    folder_path: Path,
+) -> Path:
+    """
+    Создаёт уменьшенную версию, если итоговый файл
+    превышает безопасный лимит Telegram.
+    """
+    ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+
+    output_path = (
+        folder_path
+        / "IriSSave_video_small.mp4"
+    )
+
+    command = [
+        ffmpeg_path,
+        "-y",
+        "-i",
+        str(source_path),
+
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
+
+        "-vf",
+        (
+            "setsar=1,"
+            "scale="
+            "'min(720,iw)':"
+            "-2"
+        ),
+
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "28",
+        "-maxrate",
+        "1400k",
+        "-bufsize",
+        "2800k",
+        "-pix_fmt",
+        "yuv420p",
+
+        "-c:a",
+        "aac",
+        "-b:a",
+        "96k",
+
+        "-movflags",
+        "+faststart",
+
+        "-max_muxing_queue_size",
+        "4096",
+
+        str(output_path),
+    ]
+
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=900,
+        check=False,
+    )
+
+    if (
+        result.returncode != 0
+        or not output_path.exists()
+        or output_path.stat().st_size == 0
+    ):
+        error = (
+            result.stderr.strip()
+            or "FFmpeg не смог уменьшить видео"
+        )
+
+        raise RuntimeError(
+            "Не удалось уменьшить видео.\n"
+            f"Причина: {error[-1800:]}"
+        )
+
+    return output_path
+
+
 def download_video_with_progress(
     url: str,
     folder: str,
-    progress_hook: Callable[[dict[str, Any]], None],
+    progress_hook: Callable[
+        [dict[str, Any]],
+        None,
+    ],
 ) -> Path:
     """
-    Скачивает видео со звуком без перекодирования.
-
-    Сначала выбирает готовый MP4 со встроенным звуком.
-    Если такого файла нет, скачивает лучшую видеодорожку
-    и лучшую аудиодорожку и объединяет их в MP4.
+    Скачивает видео со звуком и приводит его
+    к формату, совместимому с Telegram.
     """
     folder_path = Path(folder)
     folder_path.mkdir(
@@ -201,10 +302,12 @@ def download_video_with_progress(
 
     template = os.path.join(
         folder,
-        "%(title).80s-%(id)s.%(ext)s",
+        "source-%(title).70s-%(id)s.%(ext)s",
     )
 
-    ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+    ffmpeg_path = (
+        imageio_ffmpeg.get_ffmpeg_exe()
+    )
 
     files_before = {
         file.resolve()
@@ -212,49 +315,15 @@ def download_video_with_progress(
         if file.is_file()
     }
 
-    inspect_options: dict[str, Any] = {
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-        "socket_timeout": 120,
-        "retries": 5,
-        "fragment_retries": 5,
-    }
-
-    print(
-        f"Inspecting video: {url}",
-        flush=True,
-    )
-
-    with yt_dlp.YoutubeDL(
-        inspect_options
-    ) as inspector:
-        inspected_info = inspector.extract_info(
-            url,
-            download=False,
-        )
-
-    _print_available_formats(
-        inspected_info
-    )
-
     options: dict[str, Any] = {
         "outtmpl": template,
 
-        # 1. Готовый MP4, где уже есть видео и звук.
-        # 2. Любой готовый файл с видео и звуком.
-        # 3. Отдельные видео + аудио.
-        # 4. Стандартный запасной вариант.
         "format": (
-            "best[ext=mp4]"
+            "bestvideo[height<=1080]"
+            "+bestaudio/"
+            "best[height<=1080]"
             "[vcodec!=none]"
             "[acodec!=none]/"
-
-            "best"
-            "[vcodec!=none]"
-            "[acodec!=none]/"
-
-            "bestvideo*+bestaudio/"
             "best"
         ),
 
@@ -269,36 +338,94 @@ def download_video_with_progress(
         "socket_timeout": 120,
         "retries": 5,
         "fragment_retries": 5,
+        "file_access_retries": 3,
+        "concurrent_fragment_downloads": 3,
 
-        "progress_hooks": [progress_hook],
+        "continuedl": True,
+        "overwrites": True,
+
+        "progress_hooks": [
+            progress_hook
+        ],
+
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 "
+                "(iPhone; CPU iPhone OS 18_0 "
+                "like Mac OS X) "
+                "AppleWebKit/605.1.15 "
+                "(KHTML, like Gecko) "
+                "Version/18.0 Mobile/15E148 "
+                "Safari/604.1"
+            ),
+            "Accept-Language": (
+                "en-US,en;q=0.9"
+            ),
+        },
+
+        "extractor_args": {
+            "youtube": {
+                "player_client": [
+                    "web",
+                    "web_safari",
+                    "android_vr",
+                ],
+            },
+        },
     }
 
-    print(
-        "Downloading original video with audio...",
-        flush=True,
-    )
-
-    with yt_dlp.YoutubeDL(
-        options
-    ) as downloader:
-        downloaded_info = downloader.extract_info(
-            url,
-            download=True,
-        )
-
-        prepared_path = Path(
-            downloader.prepare_filename(
-                downloaded_info
+    try:
+        with yt_dlp.YoutubeDL(
+            options
+        ) as downloader:
+            downloaded_info = (
+                downloader.extract_info(
+                    url,
+                    download=True,
+                )
             )
-        )
 
-    _print_selected_format(
-        downloaded_info
-    )
+            if not isinstance(
+                downloaded_info,
+                dict,
+            ):
+                raise RuntimeError(
+                    "Сервис не вернул "
+                    "информацию о видео"
+                )
 
-    if not _has_audio(downloaded_info):
+            prepared_path = Path(
+                downloader.prepare_filename(
+                    downloaded_info
+                )
+            )
+
+    except yt_dlp.utils.DownloadError as error:
+        error_text = str(error)
+
+        if (
+            "Sign in to confirm"
+            in error_text
+            or "not a bot"
+            in error_text
+        ):
+            raise RuntimeError(
+                "YouTube заблокировал загрузку "
+                "с сервера Render.\n"
+                "Для YouTube потребуется подключить "
+                "cookies или другой сервер."
+            ) from error
+
         raise RuntimeError(
-            "Скачанный формат не содержит звука"
+            error_text
+        ) from error
+
+    if not _has_audio_stream(
+        downloaded_info
+    ):
+        raise RuntimeError(
+            "Сервис не предоставил "
+            "аудиодорожку для этого видео"
         )
 
     downloaded_path = _find_downloaded_video(
@@ -307,19 +434,29 @@ def download_video_with_progress(
         files_before=files_before,
     )
 
-    file_size = downloaded_path.stat().st_size
-
-    print(
-        f"Final original video: "
-        f"{downloaded_path.name} | "
-        f"{file_size} bytes",
-        flush=True,
+    normalized_path = _normalize_video(
+        source_path=downloaded_path,
+        folder_path=folder_path,
     )
 
-    if file_size > TELEGRAM_SAFE_SIZE:
+    if (
+        normalized_path.stat().st_size
+        <= TELEGRAM_SAFE_SIZE
+    ):
+        return normalized_path
+
+    smaller_path = _create_smaller_video(
+        source_path=normalized_path,
+        folder_path=folder_path,
+    )
+
+    if (
+        smaller_path.stat().st_size
+        > TELEGRAM_SAFE_SIZE
+    ):
         raise RuntimeError(
-            "Видео получилось больше 48 МБ. "
-            "Telegram не разрешит боту отправить его."
+            "Видео даже после уменьшения "
+            "осталось больше 48 МБ"
         )
 
-    return downloaded_path
+    return smaller_path
