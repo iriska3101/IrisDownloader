@@ -505,69 +505,135 @@ def metadata_from_yt_dlp(
     )
 
 
+def find_downloaded_video(
+    folder: str,
+    prepared_path: Path,
+    files_before: set[Path],
+) -> Path:
+    folder_path = Path(folder)
+
+    direct_candidates = [
+        prepared_path.with_suffix(".mp4"),
+        prepared_path,
+    ]
+
+    for candidate in direct_candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+
+    allowed_extensions = {
+        ".mp4",
+        ".mov",
+        ".mkv",
+        ".webm",
+        ".m4v",
+    }
+
+    new_files = [
+        file
+        for file in folder_path.iterdir()
+        if (
+            file.is_file()
+            and file.resolve() not in files_before
+            and file.suffix.lower() in allowed_extensions
+            and file.stat().st_size > 0
+        )
+    ]
+
+    if not new_files:
+        raise FileNotFoundError(
+            "Итоговый видеофайл после загрузки не найден"
+        )
+
+    mp4_files = [
+        file
+        for file in new_files
+        if file.suffix.lower() == ".mp4"
+    ]
+
+    candidates = mp4_files or new_files
+
+    return max(
+        candidates,
+        key=lambda item: (
+            item.stat().st_mtime,
+            item.stat().st_size,
+        ),
+    )
+
+
 def download_video(
     url: str,
     folder: str,
 ) -> Path:
+    folder_path = Path(folder)
+    folder_path.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
     template = os.path.join(
         folder,
         "%(title).80s-%(id)s.%(ext)s",
     )
 
+    files_before = {
+        file.resolve()
+        for file in folder_path.iterdir()
+        if file.is_file()
+    }
+
     options: dict[str, Any] = {
         "outtmpl": template,
-        "format": "best[ext=mp4]/best",
+        "format": (
+            "bestvideo*[height<=1080][vcodec^=avc1]"
+            "+bestaudio[ext=m4a]/"
+            "bestvideo*[height<=1080]+bestaudio/"
+            "best[height<=1080][ext=mp4][acodec!=none]/"
+            "best[height<=1080][acodec!=none]/"
+            "best"
+        ),
+        "merge_output_format": "mp4",
+        "ffmpeg_location": imageio_ffmpeg.get_ffmpeg_exe(),
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
         "restrictfilenames": True,
-        "socket_timeout": 45,
-        "retries": 2,
+        "socket_timeout": 120,
+        "retries": 5,
+        "fragment_retries": 5,
+        "file_access_retries": 3,
+        "concurrent_fragment_downloads": 3,
+        "continuedl": True,
+        "overwrites": True,
     }
 
-    with yt_dlp.YoutubeDL(
-        options
-    ) as downloader:
+    with yt_dlp.YoutubeDL(options) as downloader:
         info = downloader.extract_info(
             url,
             download=True,
         )
 
-        downloaded_path = (
+        if not isinstance(info, dict):
+            raise RuntimeError(
+                "Сервис не вернул данные о видео"
+            )
+
+        prepared_path = Path(
             downloader.prepare_filename(info)
         )
 
-    path = Path(downloaded_path)
-
-    if not path.exists():
-        files = [
-            file
-            for file in Path(folder).iterdir()
-            if file.is_file()
-        ]
-
-        if files:
-            path = max(
-                files,
-                key=lambda item: (
-                    item.stat().st_size
-                ),
-            )
-
-    return path
+    return find_downloaded_video(
+        folder=folder,
+        prepared_path=prepared_path,
+        files_before=files_before,
+    )
 
 
 def download_audio_source(
     url: str,
     folder: str,
 ) -> tuple[Path, AudioMetadata]:
-    """
-    Скачивает источник с настоящей аудиодорожкой.
-
-    Сначала пробует отдельный аудиопоток.
-    Если его нет, скачивает видео со встроенным звуком,
-    из которого FFmpeg затем извлечёт MP3.
-    """
     template = os.path.join(
         folder,
         "source-%(id)s.%(ext)s",
@@ -575,16 +641,11 @@ def download_audio_source(
 
     options: dict[str, Any] = {
         "outtmpl": template,
-
-        # 1. Отдельная аудиодорожка.
-        # 2. Готовый файл со звуком.
-        # 3. Любой формат, содержащий аудио.
         "format": (
             "bestaudio[acodec!=none]/"
             "best[ext=mp4][acodec!=none]/"
             "best[acodec!=none]"
         ),
-
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
@@ -685,88 +746,6 @@ def download_audio_source(
 
     return source_path, metadata
 
-    with yt_dlp.YoutubeDL(
-        options
-    ) as downloader:
-        info = downloader.extract_info(
-            url,
-            download=True,
-        )
-
-        requested_downloads = (
-            info.get("requested_downloads")
-            or []
-        )
-
-        has_audio = False
-
-        for item in requested_downloads:
-            if not isinstance(item, dict):
-                continue
-
-            audio_codec = item.get("acodec")
-
-            if audio_codec not in {
-                None,
-                "none",
-            }:
-                has_audio = True
-                break
-
-        if not requested_downloads:
-            audio_codec = info.get("acodec")
-
-            has_audio = audio_codec not in {
-                None,
-                "none",
-            }
-
-        if not has_audio:
-            raise RuntimeError(
-                "TikTok не отдал аудиодорожку"
-            )
-
-        downloaded_path = (
-            downloader.prepare_filename(info)
-        )
-
-    metadata = metadata_from_yt_dlp(info)
-    path = Path(downloaded_path)
-
-    if path.exists():
-        return path, metadata
-
-    candidates = [
-        file
-        for file in Path(folder).iterdir()
-        if (
-            file.is_file()
-            and file.suffix.lower()
-            in {
-                ".m4a",
-                ".mp3",
-                ".aac",
-                ".ogg",
-                ".opus",
-                ".webm",
-            }
-        )
-    ]
-
-    if not candidates:
-        raise FileNotFoundError(
-            "Исходная аудиодорожка не найдена"
-        )
-
-    return (
-        max(
-            candidates,
-            key=lambda item: (
-                item.stat().st_size
-            ),
-        ),
-        metadata,
-    )
 
 def download_direct_music(
     music_url: str,
@@ -793,27 +772,19 @@ def download_direct_music(
 
     if "mpeg" in content_type:
         extension = ".mp3"
-
     elif "ogg" in content_type:
         extension = ".ogg"
-
     elif "webm" in content_type:
         extension = ".webm"
-
     else:
         extension = ".m4a"
 
-    path = (
-        Path(folder)
-        / f"photo_music{extension}"
-    )
-
+    path = Path(folder) / f"photo_music{extension}"
     path.write_bytes(response.content)
 
     if path.stat().st_size < 5_000:
         raise RuntimeError(
-            "TikTok отдал слишком маленький "
-            "музыкальный файл"
+            "TikTok отдал слишком маленький музыкальный файл"
         )
 
     return path
@@ -829,13 +800,9 @@ def download_thumbnail(
     headers = dict(BROWSER_HEADERS)
 
     if metadata.referer:
-        headers["Referer"] = (
-            metadata.referer
-        )
+        headers["Referer"] = metadata.referer
 
-    raw_cover = (
-        Path(folder) / "cover_source"
-    )
+    raw_cover = Path(folder) / "cover_source"
 
     try:
         with httpx.Client(
@@ -843,35 +810,20 @@ def download_thumbnail(
             follow_redirects=True,
             timeout=httpx.Timeout(45),
         ) as client:
-            response = client.get(
-                metadata.cover_url
-            )
+            response = client.get(metadata.cover_url)
             response.raise_for_status()
 
         if len(response.content) < 5_000:
             return None
 
-        raw_cover.write_bytes(
-            response.content
-        )
-
+        raw_cover.write_bytes(response.content)
     except httpx.HTTPError:
         return None
 
-    ffmpeg = (
-        imageio_ffmpeg.get_ffmpeg_exe()
-    )
-
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
     output = Path(folder) / "cover.jpg"
 
-    for quality in (
-        5,
-        9,
-        13,
-        17,
-        21,
-        25,
-    ):
+    for quality in (5, 9, 13, 17, 21, 25):
         result = subprocess.run(
             [
                 ffmpeg,
@@ -881,10 +833,8 @@ def download_thumbnail(
                 "-vf",
                 (
                     "scale=320:320:"
-                    "force_original_aspect_ratio="
-                    "decrease,"
-                    "pad=320:320:"
-                    "(ow-iw)/2:(oh-ih)/2"
+                    "force_original_aspect_ratio=decrease,"
+                    "pad=320:320:(ow-iw)/2:(oh-ih)/2"
                 ),
                 "-frames:v",
                 "1",
@@ -901,8 +851,7 @@ def download_thumbnail(
         if (
             result.returncode == 0
             and output.exists()
-            and output.stat().st_size
-            <= 190_000
+            and output.stat().st_size <= 190_000
         ):
             return output
 
@@ -915,14 +864,8 @@ def convert_to_mp3(
     metadata: AudioMetadata,
     cover: Path | None,
 ) -> Path:
-    output = (
-        Path(folder)
-        / "IriSSave_audio.mp3"
-    )
-
-    ffmpeg = (
-        imageio_ffmpeg.get_ffmpeg_exe()
-    )
+    output = Path(folder) / "IriSSave_audio.mp3"
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
 
     base = [
         ffmpeg,
@@ -958,7 +901,6 @@ def convert_to_mp3(
             f"artist={metadata.performer}",
             str(output),
         ]
-
     else:
         command = [
             *base,
@@ -984,10 +926,7 @@ def convert_to_mp3(
         check=False,
     )
 
-    if (
-        result.returncode == 0
-        and output.exists()
-    ):
+    if result.returncode == 0 and output.exists():
         return output
 
     fallback = subprocess.run(
@@ -1015,19 +954,13 @@ def convert_to_mp3(
         check=False,
     )
 
-    if (
-        fallback.returncode != 0
-        or not output.exists()
-    ):
+    if fallback.returncode != 0 or not output.exists():
         error = (
             fallback.stderr.strip()
             or result.stderr.strip()
             or "FFmpeg не смог создать MP3"
         )
-
-        raise RuntimeError(
-            error[-2000:]
-        )
+        raise RuntimeError(error[-2000:])
 
     return output
 
@@ -1040,23 +973,14 @@ def download_audio_as_mp3(
     AudioMetadata,
     Path | None,
 ]:
-    """
-    Создаёт MP3 из видео или отдельной аудиодорожки.
-
-    Поиск прямой музыки со страницы используется
-    только для TikTok-фотопубликаций.
-    """
     try:
         source, metadata = download_audio_source(
             url,
             folder,
         )
-
     except Exception as normal_error:
         normalized_url = url.lower()
 
-        # Запасной способ с музыкой фотопубликации
-        # применим только к TikTok.
         if "tiktok.com" not in normalized_url:
             raise RuntimeError(
                 "Не удалось получить звуковую дорожку "
@@ -1081,8 +1005,7 @@ def download_audio_as_mp3(
         if not music_url:
             raise RuntimeError(
                 "В фотопубликации не удалось найти музыку.\n"
-                f"Обычная загрузка тоже не сработала: "
-                f"{normal_error}"
+                f"Обычная загрузка тоже не сработала: {normal_error}"
             ) from normal_error
 
         source = download_direct_music(
@@ -1139,24 +1062,18 @@ def download_photos(
             start=1,
         ):
             try:
-                response = client.get(
-                    photo_url
-                )
+                response = client.get(photo_url)
                 response.raise_for_status()
 
-                content_type = (
-                    response.headers.get(
-                        "content-type",
-                        "",
-                    ).lower()
-                )
+                content_type = response.headers.get(
+                    "content-type",
+                    "",
+                ).lower()
 
                 if "png" in content_type:
                     extension = ".png"
-
                 elif "webp" in content_type:
                     extension = ".webp"
-
                 else:
                     extension = ".jpg"
 
@@ -1166,28 +1083,19 @@ def download_photos(
                     f"{extension}"
                 )
 
-                path.write_bytes(
-                    response.content
-                )
+                path.write_bytes(response.content)
 
-                if (
-                    path.stat().st_size
-                    < 5_000
-                ):
-                    path.unlink(
-                        missing_ok=True
-                    )
+                if path.stat().st_size < 5_000:
+                    path.unlink(missing_ok=True)
                     continue
 
                 downloaded.append(path)
-
             except httpx.HTTPError:
                 continue
 
     if not downloaded:
         raise RuntimeError(
-            "TikTok не разрешил "
-            "скачать фотографии."
+            "TikTok не разрешил скачать фотографии."
         )
 
     return downloaded
