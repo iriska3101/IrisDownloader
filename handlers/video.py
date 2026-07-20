@@ -12,7 +12,12 @@ async def process_video_download(
     url: str,
     folder: str,
 ) -> None:
-    """Скачивает и отправляет видео с реальным прогрессом."""
+    """
+    Скачивает видео и временно отправляет его как документ.
+
+    Это позволяет проверить исходный файл без обработки
+    видеоплеером Telegram.
+    """
     progress = DownloadProgress(
         message=message,
         title=(
@@ -41,13 +46,17 @@ async def process_video_download(
 
     await message.edit_text(
         "⬇️ IriSSave\n\n"
-        "📤 Отправляю видео…"
+        "📤 Отправляю тестовый файл…"
     )
 
     with video_path.open("rb") as video_file:
-        await message.reply_video(
-            video=video_file,
-            supports_streaming=True,
+        await message.reply_document(
+            document=video_file,
+            filename=video_path.name,
+            caption=(
+                "Тестовый файл IriSSave\n"
+                "Проверяем пропорции и наличие звука"
+            ),
             write_timeout=300,
             read_timeout=300,
             connect_timeout=60,
@@ -56,5 +65,5 @@ async def process_video_download(
 
     await message.edit_text(
         "⬇️ IriSSave\n\n"
-        "✅ Видео готово 🎬"
+        "✅ Тестовый файл отправлен"
     )
