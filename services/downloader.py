@@ -634,347 +634,11 @@ def download_audio_source(
     url: str,
     folder: str,
 ) -> tuple[Path, AudioMetadata]:
-    template = os.path.join(
-        folder,
-        "source-%(id)s.%(ext)s",
-    )
-
-    options: dict[str, Any] = {
-        "outtmpl": template,
-        "format": (
-            "bestaudio[acodec!=none]/"
-            "best[ext=mp4][acodec!=none]/"
-            "best[acodec!=none]"
-        ),
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-        "restrictfilenames": True,
-        "socket_timeout": 120,
-        "retries": 5,
-        "fragment_retries": 5,
-    }
-
-    files_before = {
-        file.resolve()
-        for file in Path(folder).iterdir()
-        if file.is_file()
-    }
-
-    with yt_dlp.YoutubeDL(options) as downloader:
-        info = downloader.extract_info(
-            url,
-            download=True,
-        )
-
-        requested_downloads = (
-            info.get("requested_downloads")
-            or []
-        )
-
-        has_audio = False
-
-        for item in requested_downloads:
-            if not isinstance(item, dict):
-                continue
-
-            audio_codec = str(
-                item.get("acodec") or ""
-            ).lower()
-
-            if audio_codec not in {
-                "",
-                "none",
-            }:
-                has_audio = True
-                break
-
-        if not requested_downloads:
-            audio_codec = str(
-                info.get("acodec") or ""
-            ).lower()
-
-            has_audio = audio_codec not in {
-                "",
-                "none",
-            }
-
-        if not has_audio:
-            raise RuntimeError(
-                "В публикации не найдена аудиодорожка"
-            )
-
-        prepared_path = Path(
-            downloader.prepare_filename(info)
-        )
-
-    metadata = metadata_from_yt_dlp(info)
-
-    if prepared_path.exists():
-        return prepared_path, metadata
-
-    new_files = [
-        file
-        for file in Path(folder).iterdir()
-        if (
-            file.is_file()
-            and file.resolve() not in files_before
-            and file.suffix.lower()
-            in {
-                ".m4a",
-                ".mp3",
-                ".aac",
-                ".ogg",
-                ".opus",
-                ".webm",
-                ".mp4",
-                ".mov",
-                ".mkv",
-            }
-        )
-    ]
-
-    if not new_files:
-        raise FileNotFoundError(
-            "Файл с аудиодорожкой не найден"
-        )
-
-    source_path = max(
-        new_files,
-        key=lambda item: item.stat().st_mtime,
-    )
-
-    return source_path, metadata
-
-
-def download_direct_music(
-    music_url: str,
-    final_url: str,
-    folder: str,
-) -> Path:
-    headers = {
-        **BROWSER_HEADERS,
-        "Referer": final_url,
-    }
-
-    with httpx.Client(
-        headers=headers,
-        follow_redirects=True,
-        timeout=httpx.Timeout(60),
-    ) as client:
-        response = client.get(music_url)
-        response.raise_for_status()
-
-    content_type = response.headers.get(
-        "content-type",
-        "",
-    ).lower()
-
-    if "mpeg" in content_type:
-        extension = ".mp3"
-    elif "ogg" in content_type:
-        extension = ".ogg"
-    elif "webm" in content_type:
-        extension = ".webm"
-    else:
-        extension = ".m4a"
-
-    path = Path(folder) / f"photo_music{extension}"
-    path.write_bytes(response.content)
-
-    if path.stat().st_size < 5_000:
-        raise RuntimeError(
-            "TikTok отдал слишком маленький музыкальный файл"
-        )
-
-    return path
-
-
-def download_thumbnail(
-    metadata: AudioMetadata,
-    folder: str,
-) -> Path | None:
-    if not metadata.cover_url:
-        return None
-
-    headers = dict(BROWSER_HEADERS)
-
-    if metadata.referer:
-        headers["Referer"] = metadata.referer
-
-    raw_cover = Path(folder) / "cover_source"
-
-    try:
-        with httpx.Client(
-            headers=headers,
-            follow_redirects=True,
-            timeout=httpx.Timeout(45),
-        ) as client:
-            response = client.get(metadata.cover_url)
-            response.raise_for_status()
-
-        if len(response.content) < 5_000:
-            return None
-
-        raw_cover.write_bytes(response.content)
-    except httpx.HTTPError:
-        return None
-
-    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-    output = Path(folder) / "cover.jpg"
-
-    for quality in (5, 9, 13, 17, 21, 25):
-        result = subprocess.run(
-            [
-                ffmpeg,
-                "-y",
-                "-i",
-                str(raw_cover),
-                "-vf",
-                (
-                    "scale=320:320:"
-                    "force_original_aspect_ratio=decrease,"
-                    "pad=320:320:(ow-iw)/2:(oh-ih)/2"
-                ),
-                "-frames:v",
-                "1",
-                "-q:v",
-                str(quality),
-                str(output),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=90,
-            check=False,
-        )
-
-        if (
-            result.returncode == 0
-            and output.exists()
-            and output.stat().st_size <= 190_000
-        ):
-            return output
-
-    return None
-
-
-def convert_to_mp3(
-    source: Path,
-    folder: str,
-    metadata: AudioMetadata,
-    cover: Path | None,
-) -> Path:
-    output = Path(folder) / "IriSSave_audio.mp3"
-    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-
-    base = [
-        ffmpeg,
-        "-y",
-        "-i",
-        str(source),
-    ]
-
-    if cover:
-        command = [
-            *base,
-            "-i",
-            str(cover),
-            "-map",
-            "0:a:0",
-            "-map",
-            "1:v:0",
-            "-codec:a",
-            "libmp3lame",
-            "-b:a",
-            "192k",
-            "-codec:v",
-            "mjpeg",
-            "-id3v2_version",
-            "3",
-            "-metadata:s:v",
-            "title=Album cover",
-            "-metadata:s:v",
-            "comment=Cover (front)",
-            "-metadata",
-            f"title={metadata.title}",
-            "-metadata",
-            f"artist={metadata.performer}",
-            str(output),
-        ]
-    else:
-        command = [
-            *base,
-            "-vn",
-            "-codec:a",
-            "libmp3lame",
-            "-b:a",
-            "192k",
-            "-id3v2_version",
-            "3",
-            "-metadata",
-            f"title={metadata.title}",
-            "-metadata",
-            f"artist={metadata.performer}",
-            str(output),
-        ]
-
-    result = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        timeout=180,
-        check=False,
-    )
-
-    if result.returncode == 0 and output.exists():
-        return output
-
-    fallback = subprocess.run(
-        [
-            ffmpeg,
-            "-y",
-            "-i",
-            str(source),
-            "-vn",
-            "-codec:a",
-            "libmp3lame",
-            "-b:a",
-            "192k",
-            "-id3v2_version",
-            "3",
-            "-metadata",
-            f"title={metadata.title}",
-            "-metadata",
-            f"artist={metadata.performer}",
-            str(output),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=180,
-        check=False,
-    )
-
-    if fallback.returncode != 0 or not output.exists():
-        error = (
-            fallback.stderr.strip()
-            or result.stderr.strip()
-            or "FFmpeg не смог создать MP3"
-        )
-        raise RuntimeError(error[-2000:])
-
-    return output
-
-
-def download_audio_source(
-    url: str,
-    folder: str,
-) -> tuple[Path, AudioMetadata]:
     """
     Скачивает источник с реальной аудиодорожкой.
 
-    Для TikTok сначала выбирается готовый MP4:
-    H.264 + аудио. Это исключает проблемный
-    bytevc1/H.265-файл без настоящего звука.
+    Для TikTok сначала выбирается готовый MP4
+    с H.264 и настоящим звуком.
     """
     folder_path = Path(folder)
 
@@ -997,8 +661,6 @@ def download_audio_source(
     options: dict[str, Any] = {
         "outtmpl": template,
 
-        # Такой же принцип выбора, который уже
-        # вернул TikTok-видео с настоящим звуком.
         "format": (
             "best[ext=mp4]"
             "[vcodec~='^(avc1|h264)']"
@@ -1105,6 +767,341 @@ def download_audio_source(
     )
 
     return source_path, metadata
+
+
+def download_direct_music(
+    music_url: str,
+    final_url: str,
+    folder: str,
+) -> Path:
+    headers = {
+        **BROWSER_HEADERS,
+        "Referer": final_url,
+    }
+
+    with httpx.Client(
+        headers=headers,
+        follow_redirects=True,
+        timeout=httpx.Timeout(60),
+    ) as client:
+        response = client.get(music_url)
+        response.raise_for_status()
+
+    content_type = response.headers.get(
+        "content-type",
+        "",
+    ).lower()
+
+    if "mpeg" in content_type:
+        extension = ".mp3"
+    elif "ogg" in content_type:
+        extension = ".ogg"
+    elif "webm" in content_type:
+        extension = ".webm"
+    else:
+        extension = ".m4a"
+
+    path = Path(folder) / f"photo_music{extension}"
+    path.write_bytes(response.content)
+
+    if path.stat().st_size < 5_000:
+        raise RuntimeError(
+            "TikTok отдал слишком маленький музыкальный файл"
+        )
+
+    return path
+
+
+def download_thumbnail(
+    metadata: AudioMetadata,
+    folder: str,
+) -> Path | None:
+    if not metadata.cover_url:
+        return None
+
+    headers = dict(BROWSER_HEADERS)
+
+    if metadata.referer:
+        headers["Referer"] = metadata.referer
+
+    raw_cover = Path(folder) / "cover_source"
+
+    try:
+        with httpx.Client(
+            headers=headers,
+            follow_redirects=True,
+            timeout=httpx.Timeout(45),
+        ) as client:
+            response = client.get(metadata.cover_url)
+            response.raise_for_status()
+
+        if len(response.content) < 5_000:
+            return None
+
+        raw_cover.write_bytes(response.content)
+
+    except httpx.HTTPError:
+        return None
+
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    output = Path(folder) / "cover.jpg"
+
+    for quality in (5, 9, 13, 17, 21, 25):
+        result = subprocess.run(
+            [
+                ffmpeg,
+                "-y",
+                "-i",
+                str(raw_cover),
+                "-vf",
+                (
+                    "scale=320:320:"
+                    "force_original_aspect_ratio=decrease,"
+                    "pad=320:320:(ow-iw)/2:(oh-ih)/2"
+                ),
+                "-frames:v",
+                "1",
+                "-q:v",
+                str(quality),
+                str(output),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=90,
+            check=False,
+        )
+
+        if (
+            result.returncode == 0
+            and output.exists()
+            and output.stat().st_size <= 190_000
+        ):
+            return output
+
+    return None
+
+
+def convert_to_mp3(
+    source: Path,
+    folder: str,
+    metadata: AudioMetadata,
+    cover: Path | None,
+) -> Path:
+    output = Path(folder) / "IriSSave_audio.mp3"
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+
+    base = [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(source),
+    ]
+
+    if cover:
+        command = [
+            *base,
+            "-i",
+            str(cover),
+            "-map",
+            "0:a:0",
+            "-map",
+            "1:v:0",
+            "-codec:a",
+            "libmp3lame",
+            "-b:a",
+            "192k",
+            "-codec:v",
+            "mjpeg",
+            "-id3v2_version",
+            "3",
+            "-metadata:s:v",
+            "title=Album cover",
+            "-metadata:s:v",
+            "comment=Cover (front)",
+            "-metadata",
+            f"title={metadata.title}",
+            "-metadata",
+            f"artist={metadata.performer}",
+            str(output),
+        ]
+
+    else:
+        command = [
+            *base,
+            "-vn",
+            "-codec:a",
+            "libmp3lame",
+            "-b:a",
+            "192k",
+            "-id3v2_version",
+            "3",
+            "-metadata",
+            f"title={metadata.title}",
+            "-metadata",
+            f"artist={metadata.performer}",
+            str(output),
+        ]
+
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+
+    if (
+        result.returncode == 0
+        and output.exists()
+        and output.stat().st_size > 0
+    ):
+        return output
+
+    fallback = subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(source),
+            "-map",
+            "0:a:0",
+            "-vn",
+            "-codec:a",
+            "libmp3lame",
+            "-b:a",
+            "192k",
+            "-id3v2_version",
+            "3",
+            "-metadata",
+            f"title={metadata.title}",
+            "-metadata",
+            f"artist={metadata.performer}",
+            str(output),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+
+    if (
+        fallback.returncode != 0
+        or not output.exists()
+        or output.stat().st_size == 0
+    ):
+        error = (
+            fallback.stderr.strip()
+            or result.stderr.strip()
+            or "FFmpeg не смог создать MP3"
+        )
+
+        raise RuntimeError(
+            error[-2000:]
+        )
+
+    return output
+
+
+def download_audio_as_mp3(
+    url: str,
+    folder: str,
+) -> tuple[
+    Path,
+    AudioMetadata,
+    Path | None,
+]:
+    """
+    Загружает звуковую дорожку и создаёт MP3.
+
+    Если обычное извлечение TikTok-аудио не удалось,
+    пробует прямую музыкальную ссылку.
+    """
+    source: Path
+    metadata: AudioMetadata
+
+    try:
+        source, metadata = download_audio_source(
+            url,
+            folder,
+        )
+
+        cover = download_thumbnail(
+            metadata,
+            folder,
+        )
+
+        try:
+            mp3 = convert_to_mp3(
+                source,
+                folder,
+                metadata,
+                cover,
+            )
+
+            return mp3, metadata, cover
+
+        except Exception as conversion_error:
+            if "tiktok.com" not in url.lower():
+                raise RuntimeError(
+                    "Не удалось преобразовать "
+                    "звуковую дорожку в MP3.\n"
+                    f"Причина: {conversion_error}"
+                ) from conversion_error
+
+            normal_error: Exception = conversion_error
+
+    except Exception as download_error:
+        if "tiktok.com" not in url.lower():
+            raise RuntimeError(
+                "Не удалось получить звуковую дорожку "
+                "из этой публикации.\n"
+                f"Причина: {download_error}"
+            ) from download_error
+
+        normal_error = download_error
+
+    try:
+        (
+            _,
+            music_url,
+            final_url,
+            fallback_metadata,
+        ) = get_tiktok_post_assets(url)
+
+        if not music_url:
+            raise RuntimeError(
+                "TikTok не предоставил прямую "
+                "ссылку на музыку"
+            )
+
+        source = download_direct_music(
+            music_url,
+            final_url,
+            folder,
+        )
+
+        metadata = fallback_metadata
+
+        cover = download_thumbnail(
+            metadata,
+            folder,
+        )
+
+        mp3 = convert_to_mp3(
+            source,
+            folder,
+            metadata,
+            cover,
+        )
+
+        return mp3, metadata, cover
+
+    except Exception as fallback_error:
+        raise RuntimeError(
+            "Не удалось получить MP3 из публикации.\n"
+            f"Основная попытка: {normal_error}\n"
+            f"Резервная попытка: {fallback_error}"
+        ) from fallback_error
 
 
 def download_photos(
