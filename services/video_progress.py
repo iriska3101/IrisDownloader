@@ -148,12 +148,11 @@ def download_video_with_progress(
     """
     Диагностическая загрузка.
 
-    Файл скачивается через yt-dlp и возвращается без:
-    - FFmpeg;
-    - перекодирования;
-    - изменения пропорций;
-    - проверки аудиодорожки;
-    - повторной загрузки.
+    Сначала выбирается готовый MP4 с H.264 и звуком.
+    Если такого варианта нет, выбирается другой
+    готовый формат с аудиодорожкой.
+
+    Файл возвращается без перекодирования.
     """
     folder_path = Path(folder)
 
@@ -176,13 +175,27 @@ def download_video_with_progress(
     options: dict[str, Any] = {
         "outtmpl": template,
 
-        # Явно просим yt-dlp скачать видео + аудио
-        # и объединить их в MP4.
+        # Сначала ищем готовый MP4:
+        # H.264 + настоящая аудиодорожка.
+        #
+        # Затем любой MP4 со звуком.
+        # Затем любой готовый формат со звуком.
         "format": (
-            "bestvideo+bestaudio/"
-            "best[ext=mp4]/"
-            "best"
+            "best[ext=mp4]"
+            "[vcodec~='^(avc1|h264)']"
+            "[acodec!=none]/"
+            "best[ext=mp4]"
+            "[acodec!=none]/"
+            "best[acodec!=none]"
         ),
+
+        # Предпочитаем H.264 вместо H.265.
+        "format_sort": [
+            "vcodec:h264",
+            "res",
+            "fps",
+            "hasaud",
+        ],
 
         "merge_output_format": "mp4",
 
