@@ -4,6 +4,8 @@ from typing import Any, Callable
 
 import yt_dlp
 
+from services.formats.common import get_platform_options
+
 
 TELEGRAM_SAFE_SIZE = 48 * 1024 * 1024
 
@@ -58,14 +60,21 @@ def _find_downloaded_video(
 
 
 def _print_download_info(
+    platform: str,
     info: dict[str, Any],
     video_path: Path,
 ) -> None:
     """
-    Выводит в Render Logs информацию о скачанном файле.
+    Выводит в Render Logs информацию
+    о скачанном файле.
     """
     print(
         "\n========== IRISSAVE DIAGNOSTIC ==========",
+        flush=True,
+    )
+
+    print(
+        f"Platform: {platform}",
         flush=True,
     )
 
@@ -146,19 +155,23 @@ def download_video_with_progress(
     ],
 ) -> Path:
     """
-    Диагностическая загрузка.
-
-    Сначала выбирается готовый MP4 с H.264 и звуком.
-    Если такого варианта нет, выбирается другой
-    готовый формат с аудиодорожкой.
-
-    Файл возвращается без перекодирования.
+    Загружает видео с отдельными настройками
+    для TikTok, Instagram и YouTube.
     """
     folder_path = Path(folder)
 
     folder_path.mkdir(
         parents=True,
         exist_ok=True,
+    )
+
+    platform, platform_options = (
+        get_platform_options(url)
+    )
+
+    print(
+        f"IRISSAVE PLATFORM: {platform}",
+        flush=True,
     )
 
     template = os.path.join(
@@ -174,47 +187,23 @@ def download_video_with_progress(
 
     options: dict[str, Any] = {
         "outtmpl": template,
-
-        # Сначала ищем готовый MP4:
-        # H.264 + настоящая аудиодорожка.
-        #
-        # Затем любой MP4 со звуком.
-        # Затем любой готовый формат со звуком.
-        "format": (
-            "best[ext=mp4]"
-            "[vcodec~='^(avc1|h264)']"
-            "[acodec!=none]/"
-            "best[ext=mp4]"
-            "[acodec!=none]/"
-            "best[acodec!=none]"
-        ),
-
-        # Предпочитаем H.264 вместо H.265.
-        "format_sort": [
-            "vcodec:h264",
-            "res",
-            "fps",
-            "hasaud",
-        ],
-
-        "merge_output_format": "mp4",
-
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
         "restrictfilenames": True,
-
         "socket_timeout": 60,
         "retries": 2,
         "fragment_retries": 2,
-
         "continuedl": True,
         "overwrites": True,
-
         "progress_hooks": [
             progress_hook,
         ],
     }
+
+    options.update(
+        platform_options
+    )
 
     try:
         with yt_dlp.YoutubeDL(
@@ -230,11 +219,14 @@ def download_video_with_progress(
                 flush=True,
             )
 
-            for file_path in sorted(folder_path.iterdir()):
+            for file_path in sorted(
+                folder_path.iterdir()
+            ):
                 if file_path.is_file():
                     print(
                         f"FILE: {file_path.name} | "
-                        f"SIZE: {file_path.stat().st_size} bytes",
+                        f"SIZE: "
+                        f"{file_path.stat().st_size} bytes",
                         flush=True,
                     )
 
@@ -264,6 +256,7 @@ def download_video_with_progress(
     )
 
     _print_download_info(
+        platform=platform,
         info=info,
         video_path=video_path,
     )
