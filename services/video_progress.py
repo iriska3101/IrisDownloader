@@ -173,7 +173,7 @@ def download_video_with_progress(
         if file.is_file()
     }
 
-        options: dict[str, Any] = {
+    options: dict[str, Any] = {
         "outtmpl": template,
 
         # Явно просим yt-dlp скачать видео + аудио
