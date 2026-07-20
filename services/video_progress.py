@@ -204,17 +204,23 @@ def download_video_with_progress(
                 download=True,
             )
 
-        print("\n========== FILES AFTER YT-DLP ==========", flush=True)
+            print(
+                "\n========== FILES AFTER YT-DLP ==========",
+                flush=True,
+            )
 
-        for file_path in sorted(folder_path.iterdir()):
-            if file_path.is_file():
-                print(
-                    f"FILE: {file_path.name} | "
-                    f"SIZE: {file_path.stat().st_size} bytes",
-                    flush=True,
-                )
+            for file_path in sorted(folder_path.iterdir()):
+                if file_path.is_file():
+                    print(
+                        f"FILE: {file_path.name} | "
+                        f"SIZE: {file_path.stat().st_size} bytes",
+                        flush=True,
+                    )
 
-        print("========================================\n", flush=True)
+            print(
+                "========================================\n",
+                flush=True,
+            )
 
             if not isinstance(info, dict):
                 raise RuntimeError(
