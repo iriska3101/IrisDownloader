@@ -965,68 +965,146 @@ def convert_to_mp3(
     return output
 
 
-def download_audio_as_mp3(
+def download_audio_source(
     url: str,
     folder: str,
-) -> tuple[
-    Path,
-    AudioMetadata,
-    Path | None,
-]:
-    try:
-        source, metadata = download_audio_source(
+) -> tuple[Path, AudioMetadata]:
+    """
+    Скачивает источник с реальной аудиодорожкой.
+
+    Для TikTok сначала выбирается готовый MP4:
+    H.264 + аудио. Это исключает проблемный
+    bytevc1/H.265-файл без настоящего звука.
+    """
+    folder_path = Path(folder)
+
+    folder_path.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    template = os.path.join(
+        folder,
+        "source-%(id)s.%(ext)s",
+    )
+
+    files_before = {
+        file.resolve()
+        for file in folder_path.iterdir()
+        if file.is_file()
+    }
+
+    options: dict[str, Any] = {
+        "outtmpl": template,
+
+        # Такой же принцип выбора, который уже
+        # вернул TikTok-видео с настоящим звуком.
+        "format": (
+            "best[ext=mp4]"
+            "[vcodec~='^(avc1|h264)']"
+            "[acodec!=none]/"
+            "best[ext=mp4]"
+            "[acodec!=none]/"
+            "bestaudio[acodec!=none]/"
+            "best[acodec!=none]"
+        ),
+
+        "format_sort": [
+            "vcodec:h264",
+            "hasaud",
+            "res",
+            "fps",
+        ],
+
+        "merge_output_format": "mp4",
+        "ffmpeg_location": (
+            imageio_ffmpeg.get_ffmpeg_exe()
+        ),
+
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "restrictfilenames": True,
+
+        "socket_timeout": 120,
+        "retries": 5,
+        "fragment_retries": 5,
+        "file_access_retries": 3,
+
+        "continuedl": True,
+        "overwrites": True,
+    }
+
+    with yt_dlp.YoutubeDL(
+        options
+    ) as downloader:
+        info = downloader.extract_info(
             url,
-            folder,
-        )
-    except Exception as normal_error:
-        normalized_url = url.lower()
-
-        if "tiktok.com" not in normalized_url:
-            raise RuntimeError(
-                "Не удалось получить звуковую дорожку "
-                "из этой публикации.\n"
-                f"Причина: {normal_error}"
-            ) from normal_error
-
-        (
-            photo_urls,
-            music_url,
-            final_url,
-            metadata,
-        ) = get_tiktok_post_assets(url)
-
-        if not photo_urls:
-            raise RuntimeError(
-                "Не удалось получить звуковую дорожку "
-                "из видео.\n"
-                f"Причина: {normal_error}"
-            ) from normal_error
-
-        if not music_url:
-            raise RuntimeError(
-                "В фотопубликации не удалось найти музыку.\n"
-                f"Обычная загрузка тоже не сработала: {normal_error}"
-            ) from normal_error
-
-        source = download_direct_music(
-            music_url,
-            final_url,
-            folder,
+            download=True,
         )
 
-    cover = download_thumbnail(
-        metadata,
-        folder,
+        if not isinstance(info, dict):
+            raise RuntimeError(
+                "Сервис не вернул данные об аудио"
+            )
+
+        prepared_path = Path(
+            downloader.prepare_filename(info)
+        )
+
+    metadata = metadata_from_yt_dlp(info)
+
+    direct_candidates = [
+        prepared_path.with_suffix(".mp4"),
+        prepared_path,
+    ]
+
+    for candidate in direct_candidates:
+        if (
+            candidate.exists()
+            and candidate.is_file()
+            and candidate.stat().st_size > 0
+        ):
+            return candidate, metadata
+
+    allowed_extensions = {
+        ".m4a",
+        ".mp3",
+        ".aac",
+        ".ogg",
+        ".opus",
+        ".webm",
+        ".mp4",
+        ".mov",
+        ".mkv",
+    }
+
+    new_files = [
+        file
+        for file in folder_path.iterdir()
+        if (
+            file.is_file()
+            and file.resolve() not in files_before
+            and file.suffix.lower()
+            in allowed_extensions
+            and file.stat().st_size > 0
+        )
+    ]
+
+    if not new_files:
+        raise FileNotFoundError(
+            "Файл с аудиодорожкой не найден"
+        )
+
+    source_path = max(
+        new_files,
+        key=lambda item: (
+            item.stat().st_mtime,
+            item.stat().st_size,
+        ),
     )
 
-    mp3 = convert_to_mp3(
-        source,
-        folder,
-        metadata,
-        cover,
-    )
-
-    return mp3, metadata, cover
+    return source_path, metadata
 
 
 def download_photos(
