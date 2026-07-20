@@ -302,12 +302,7 @@ def _build_download_options(
         "outtmpl": template,
 
         "format": (
-            "bestvideo[height<=1080]"
-            "+bestaudio/"
-            "best[height<=1080]"
-            "[vcodec!=none]"
-            "[acodec!=none]/"
-            "best"
+             "bv*+ba/b"
         ),
 
         "merge_output_format": "mp4",
