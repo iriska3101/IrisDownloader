@@ -173,11 +173,19 @@ def download_video_with_progress(
         if file.is_file()
     }
 
-    options: dict[str, Any] = {
+        options: dict[str, Any] = {
         "outtmpl": template,
 
-        # Специально не задаём format.
-        # yt-dlp сам выберет стандартный формат.
+        # Явно просим yt-dlp скачать видео + аудио
+        # и объединить их в MP4.
+        "format": (
+            "bestvideo+bestaudio/"
+            "best[ext=mp4]/"
+            "best"
+        ),
+
+        "merge_output_format": "mp4",
+
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
@@ -191,7 +199,7 @@ def download_video_with_progress(
         "overwrites": True,
 
         "progress_hooks": [
-            progress_hook
+            progress_hook,
         ],
     }
 
