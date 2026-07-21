@@ -5,8 +5,8 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from handlers.media import (
+    send_media_albums,
     send_mp3,
-    send_photo_albums,
 )
 from handlers.video import process_video_download
 from services.downloader import (
@@ -21,7 +21,7 @@ async def handle_download_choice(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    """Обрабатывает кнопки видео, MP3 и фотографий."""
+    """Обрабатывает кнопки видео, MP3 и публикаций."""
     query = update.callback_query
 
     if query is None or query.message is None:
@@ -66,7 +66,7 @@ async def handle_download_choice(
     activity_texts = {
         "download_video": "Подготавливаю видео…",
         "download_audio": "Подготавливаю MP3…",
-        "download_photos": "Ищу фотографии…",
+        "download_photos": "Ищу файлы публикации…",
     }
 
     indicator = ActivityIndicator(
@@ -83,10 +83,10 @@ async def handle_download_choice(
         with tempfile.TemporaryDirectory() as folder:
             if query.data == "download_photos":
                 await indicator.change_text(
-                    "Скачиваю фотографии…"
+                    "Скачиваю публикацию…"
                 )
 
-                photos: list[Path] = (
+                media_files: list[Path] = (
                     await run_with_retry(
                         download_photos,
                         url,
@@ -96,20 +96,20 @@ async def handle_download_choice(
                 )
 
                 await indicator.change_text(
-                    "Отправляю фотографии…"
+                    "Отправляю файлы…"
                 )
 
-                await send_photo_albums(
+                await send_media_albums(
                     message,
-                    photos,
+                    media_files,
                 )
 
                 await indicator.stop()
 
                 await message.edit_text(
                     "⬇️ IriSSave\n\n"
-                    "✅ Фотографии успешно скачаны — "
-                    f"{len(photos)} шт."
+                    "✅ Публикация успешно скачана — "
+                    f"{len(media_files)} файл(ов)."
                 )
 
             elif query.data == "download_audio":
