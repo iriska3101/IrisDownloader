@@ -46,16 +46,50 @@ def _clean_instagram_url(url: str) -> str:
 def _is_http_url(value: Any) -> bool:
     return (
         isinstance(value, str)
-        and value.startswith(("http://", "https://"))
+        and value.startswith(
+            (
+                "http://",
+                "https://",
+            )
+        )
     )
 
 
 def _get_extension_from_url(url: str) -> str:
     path = urlsplit(url).path.lower()
 
-    suffix = Path(path).suffix.lower().lstrip(".")
+    return (
+        Path(path)
+        .suffix
+        .lower()
+        .lstrip(".")
+    )
 
-    return suffix
+
+def _has_video_codec(
+    media_format: dict[str, Any],
+) -> bool:
+    video_codec = str(
+        media_format.get("vcodec") or ""
+    ).lower()
+
+    return video_codec not in {
+        "",
+        "none",
+    }
+
+
+def _has_audio_codec(
+    media_format: dict[str, Any],
+) -> bool:
+    audio_codec = str(
+        media_format.get("acodec") or ""
+    ).lower()
+
+    return audio_codec not in {
+        "",
+        "none",
+    }
 
 
 def _choose_best_thumbnail(
@@ -72,22 +106,31 @@ def _choose_best_thumbnail(
 
     if isinstance(thumbnails, list):
         for thumbnail in thumbnails:
-            if not isinstance(thumbnail, dict):
+            if not isinstance(
+                thumbnail,
+                dict,
+            ):
                 continue
 
             thumbnail_url = thumbnail.get("url")
 
-            if not _is_http_url(thumbnail_url):
+            if not _is_http_url(
+                thumbnail_url
+            ):
                 continue
 
             width = thumbnail.get("width")
             height = thumbnail.get("height")
 
             try:
-                area = int(width or 0) * int(
-                    height or 0
+                area = (
+                    int(width or 0)
+                    * int(height or 0)
                 )
-            except (TypeError, ValueError):
+            except (
+                TypeError,
+                ValueError,
+            ):
                 area = 0
 
             candidates.append(
@@ -97,7 +140,9 @@ def _choose_best_thumbnail(
                 )
             )
 
-    direct_thumbnail = entry.get("thumbnail")
+    direct_thumbnail = entry.get(
+        "thumbnail"
+    )
 
     if _is_http_url(direct_thumbnail):
         candidates.append(
@@ -122,14 +167,23 @@ def _choose_best_video_url(
     entry: dict[str, Any],
 ) -> str | None:
     """
-    Выбирает наиболее совместимый MP4-вариант.
+    Выбирает совместимый видеофайл со звуком.
 
-    H.264 предпочитается перед VP9/AV1,
-    потому что он надёжнее воспроизводится
-    в Telegram и на iPhone.
+    Приоритет:
+    1. MP4 с видеодорожкой и аудиодорожкой.
+    2. H.264 с аудио.
+    3. Максимальное доступное разрешение.
+
+    Форматы без звука используются только
+    как крайний резервный вариант.
     """
     candidates: list[
-        tuple[int, int, str]
+        tuple[
+            int,
+            int,
+            int,
+            str,
+        ]
     ] = []
 
     formats = entry.get("formats")
@@ -142,29 +196,41 @@ def _choose_best_video_url(
             ):
                 continue
 
-            media_url = media_format.get("url")
+            media_url = media_format.get(
+                "url"
+            )
 
             if not _is_http_url(media_url):
                 continue
 
+            if not _has_video_codec(
+                media_format
+            ):
+                continue
+
             extension = str(
-                media_format.get("ext") or ""
+                media_format.get("ext")
+                or ""
             ).lower()
 
             video_codec = str(
-                media_format.get("vcodec") or ""
+                media_format.get("vcodec")
+                or ""
             ).lower()
 
-            if video_codec in {
-                "",
-                "none",
-            }:
-                continue
+            has_audio = _has_audio_codec(
+                media_format
+            )
 
             compatibility_score = 0
 
+            if has_audio:
+                compatibility_score += 1000
+            else:
+                compatibility_score -= 1000
+
             if extension == "mp4":
-                compatibility_score += 100
+                compatibility_score += 300
 
             if video_codec.startswith(
                 (
@@ -172,7 +238,7 @@ def _choose_best_video_url(
                     "h264",
                 )
             ):
-                compatibility_score += 200
+                compatibility_score += 400
 
             if video_codec.startswith(
                 (
@@ -181,22 +247,47 @@ def _choose_best_video_url(
                     "av01",
                 )
             ):
-                compatibility_score -= 100
+                compatibility_score -= 200
 
-            width = media_format.get("width")
-            height = media_format.get("height")
+            width = media_format.get(
+                "width"
+            )
+            height = media_format.get(
+                "height"
+            )
 
             try:
-                area = int(width or 0) * int(
-                    height or 0
+                area = (
+                    int(width or 0)
+                    * int(height or 0)
                 )
-            except (TypeError, ValueError):
+            except (
+                TypeError,
+                ValueError,
+            ):
                 area = 0
+
+            try:
+                bitrate = int(
+                    float(
+                        media_format.get(
+                            "tbr"
+                        )
+                        or 0
+                    )
+                    * 1000
+                )
+            except (
+                TypeError,
+                ValueError,
+            ):
+                bitrate = 0
 
             candidates.append(
                 (
                     compatibility_score,
                     area,
+                    bitrate,
                     media_url,
                 )
             )
@@ -206,11 +297,12 @@ def _choose_best_video_url(
             key=lambda item: (
                 item[0],
                 item[1],
+                item[2],
             ),
             reverse=True,
         )
 
-        return candidates[0][2]
+        return candidates[0][3]
 
     direct_url = entry.get("url")
 
@@ -219,13 +311,17 @@ def _choose_best_video_url(
             entry.get("ext") or ""
         ).lower()
 
-        url_extension = _get_extension_from_url(
-            direct_url
+        url_extension = (
+            _get_extension_from_url(
+                direct_url
+            )
         )
 
         if (
-            extension in _VIDEO_EXTENSIONS
-            or url_extension in _VIDEO_EXTENSIONS
+            extension
+            in _VIDEO_EXTENSIONS
+            or url_extension
+            in _VIDEO_EXTENSIONS
         ):
             return direct_url
 
@@ -269,14 +365,9 @@ def _looks_like_video(
             ):
                 continue
 
-            codec = str(
-                media_format.get("vcodec") or ""
-            ).lower()
-
-            if codec not in {
-                "",
-                "none",
-            }:
+            if _has_video_codec(
+                media_format
+            ):
                 return True
 
     return False
@@ -286,9 +377,11 @@ def _collect_instagram_media(
     info: dict[str, Any],
 ) -> list[tuple[str, str]]:
     """
-    Возвращает элементы публикации в исходном порядке.
+    Возвращает элементы публикации
+    в исходном порядке.
 
-    Результат:
+    Пример результата:
+
     [
         ("image", "https://..."),
         ("video", "https://..."),
@@ -338,8 +431,10 @@ def _collect_instagram_media(
             return
 
         if _looks_like_video(value):
-            video_url = _choose_best_video_url(
-                value
+            video_url = (
+                _choose_best_video_url(
+                    value
+                )
             )
 
             if video_url:
@@ -388,6 +483,45 @@ def _extension_from_content_type(
     return ".jpg"
 
 
+def _extension_from_url(
+    media_url: str,
+    media_type: str,
+) -> str:
+    extension = (
+        _get_extension_from_url(
+            media_url
+        )
+    )
+
+    if media_type == "video":
+        if extension in _VIDEO_EXTENSIONS:
+            return f".{extension}"
+
+        return ".mp4"
+
+    if extension in _IMAGE_EXTENSIONS:
+        return f".{extension}"
+
+    return ".jpg"
+
+
+def _choose_output_extension(
+    media_url: str,
+    content_type: str,
+    media_type: str,
+) -> str:
+    if content_type:
+        return _extension_from_content_type(
+            content_type,
+            media_type,
+        )
+
+    return _extension_from_url(
+        media_url,
+        media_type,
+    )
+
+
 def download_instagram_media(
     url: str,
     folder: str,
@@ -401,15 +535,19 @@ def download_instagram_media(
     - карусель из видео;
     - смешанную карусель.
     """
-    clean_url = _clean_instagram_url(url)
+    clean_url = _clean_instagram_url(
+        url
+    )
 
     options: dict[str, Any] = {
         "quiet": True,
         "no_warnings": True,
         "noplaylist": False,
         "socket_timeout": 60,
-        "retries": 2,
-        "extractor_retries": 2,
+        "retries": 3,
+        "fragment_retries": 3,
+        "extractor_retries": 3,
+        "http_headers": BROWSER_HEADERS,
     }
 
     try:
@@ -419,7 +557,7 @@ def download_instagram_media(
             info = downloader.extract_info(
                 clean_url,
                 download=False,
-                process=False,
+                process=True,
             )
 
     except yt_dlp.utils.DownloadError as error:
@@ -430,11 +568,14 @@ def download_instagram_media(
 
     if not isinstance(info, dict):
         raise RuntimeError(
-            "Instagram не вернул данные публикации."
+            "Instagram не вернул данные "
+            "публикации."
         )
 
-    media_items = _collect_instagram_media(
-        info
+    media_items = (
+        _collect_instagram_media(
+            info
+        )
     )
 
     if not media_items:
@@ -459,7 +600,7 @@ def download_instagram_media(
 
     timeout = httpx.Timeout(
         connect=30,
-        read=90,
+        read=120,
         write=30,
         pool=30,
     )
@@ -491,10 +632,15 @@ def download_instagram_media(
                 )
                 continue
 
-            content_type = response.headers.get(
-                "content-type",
-                "",
-            ).lower()
+            content_type = (
+                response.headers.get(
+                    "content-type",
+                    "",
+                )
+                .split(";")[0]
+                .strip()
+                .lower()
+            )
 
             if media_type == "image":
                 if (
@@ -503,9 +649,16 @@ def download_instagram_media(
                         "image/"
                     )
                 ):
+                    print(
+                        "Instagram returned "
+                        "non-image content "
+                        f"for item #{index}: "
+                        f"{content_type}",
+                        flush=True,
+                    )
                     continue
 
-            else:
+            if media_type == "video":
                 if (
                     content_type
                     and not (
@@ -516,10 +669,18 @@ def download_instagram_media(
                         in content_type
                     )
                 ):
+                    print(
+                        "Instagram returned "
+                        "non-video content "
+                        f"for item #{index}: "
+                        f"{content_type}",
+                        flush=True,
+                    )
                     continue
 
             extension = (
-                _extension_from_content_type(
+                _choose_output_extension(
+                    media_url,
                     content_type,
                     media_type,
                 )
@@ -531,9 +692,17 @@ def download_instagram_media(
                 f"{extension}"
             )
 
-            path.write_bytes(
-                response.content
-            )
+            try:
+                path.write_bytes(
+                    response.content
+                )
+            except OSError as error:
+                print(
+                    "Instagram file saving "
+                    f"failed #{index}: {error}",
+                    flush=True,
+                )
+                continue
 
             minimum_size = (
                 5_000
@@ -541,7 +710,14 @@ def download_instagram_media(
                 else 20_000
             )
 
-            if path.stat().st_size < minimum_size:
+            try:
+                file_size = (
+                    path.stat().st_size
+                )
+            except OSError:
+                file_size = 0
+
+            if file_size < minimum_size:
                 path.unlink(
                     missing_ok=True
                 )
