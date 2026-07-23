@@ -6,6 +6,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin
 
 import httpx
 import imageio_ffmpeg
@@ -354,6 +355,161 @@ def extract_fallback_photo_urls(
     return list(dict.fromkeys(found))
 
 
+def extract_tiktok_canonical_url(
+    page_html: str,
+    base_url: str,
+) -> str | None:
+    """
+    Ищет настоящую ссылку на TikTok-публикацию в HTML.
+
+    Это особенно важно для TikTok Lite и коротких ссылок,
+    которые могут открываться через несколько редиректов.
+    """
+    decoded = html.unescape(page_html)
+    decoded = decoded.replace("\\u002F", "/")
+    decoded = decoded.replace("\\/", "/")
+
+    patterns = [
+        (
+            r'<link[^>]+rel=["\']canonical["\'][^>]+'
+            r'href=["\']([^"\']+)["\']'
+        ),
+        (
+            r'<link[^>]+href=["\']([^"\']+)["\'][^>]+'
+            r'rel=["\']canonical["\']'
+        ),
+        (
+            r'<meta[^>]+property=["\']og:url["\'][^>]+'
+            r'content=["\']([^"\']+)["\']'
+        ),
+        (
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+'
+            r'property=["\']og:url["\']'
+        ),
+        (
+            r'https?://(?:www\.)?tiktok\.com/'
+            r'@[^"\'\s<>]+/(?:video|photo)/\d+'
+        ),
+    ]
+
+    for pattern in patterns:
+        match = re.search(
+            pattern,
+            decoded,
+            flags=re.IGNORECASE,
+        )
+
+        if not match:
+            continue
+
+        candidate = (
+            match.group(1)
+            if match.lastindex
+            else match.group(0)
+        )
+
+        candidate = urljoin(
+            base_url,
+            candidate.strip(),
+        )
+
+        if "tiktok.com" in candidate.lower():
+            return candidate
+
+    return None
+
+
+def resolve_tiktok_url(
+    url: str,
+) -> str:
+    """
+    Приводит TikTok Lite, vm.tiktok.com и vt.tiktok.com
+    к конечной ссылке публикации.
+
+    Если TikTok не разрешает раскрыть ссылку отдельно,
+    возвращает исходный URL, чтобы дальнейшая логика
+    всё равно могла попробовать обработать его.
+    """
+    lowered = url.lower()
+
+    if "tiktok.com" not in lowered:
+        return url
+
+    if (
+        "/video/" in lowered
+        or "/photo/" in lowered
+    ):
+        return url
+
+    headers = dict(BROWSER_HEADERS)
+
+    timeout = httpx.Timeout(
+        connect=15.0,
+        read=25.0,
+        write=15.0,
+        pool=15.0,
+    )
+
+    head_final_url: str | None = None
+
+    try:
+        with httpx.Client(
+            headers=headers,
+            follow_redirects=True,
+            timeout=timeout,
+        ) as client:
+            response = client.head(url)
+
+            if response.status_code < 400:
+                head_final_url = str(response.url)
+
+                lowered_final = head_final_url.lower()
+
+                if (
+                    "/video/" in lowered_final
+                    or "/photo/" in lowered_final
+                ):
+                    return head_final_url
+
+    except httpx.HTTPError:
+        pass
+
+    try:
+        with httpx.Client(
+            headers=headers,
+            follow_redirects=True,
+            timeout=timeout,
+        ) as client:
+            response = client.get(url)
+            response.raise_for_status()
+
+            final_url = str(response.url)
+
+            lowered_final = final_url.lower()
+
+            if (
+                "/video/" in lowered_final
+                or "/photo/" in lowered_final
+            ):
+                return final_url
+
+            canonical_url = extract_tiktok_canonical_url(
+                response.text,
+                final_url,
+            )
+
+            if canonical_url:
+                return canonical_url
+
+            if final_url != url:
+                return final_url
+
+    except httpx.HTTPError:
+        pass
+
+    return head_final_url or url
+
+
 def get_tiktok_post_assets(
     url: str,
 ) -> tuple[
@@ -362,16 +518,45 @@ def get_tiktok_post_assets(
     str,
     AudioMetadata,
 ]:
+    resolved_url = resolve_tiktok_url(url)
+
+    timeout = httpx.Timeout(
+        connect=20.0,
+        read=45.0,
+        write=20.0,
+        pool=20.0,
+    )
+
     with httpx.Client(
         headers=BROWSER_HEADERS,
         follow_redirects=True,
-        timeout=httpx.Timeout(45),
+        timeout=timeout,
     ) as client:
-        response = client.get(url)
-        response.raise_for_status()
+        try:
+            response = client.get(resolved_url)
+            response.raise_for_status()
+
+        except httpx.HTTPError as first_error:
+            if resolved_url == url:
+                raise
+
+            try:
+                response = client.get(url)
+                response.raise_for_status()
+
+            except httpx.HTTPError:
+                raise first_error
 
         final_url = str(response.url)
         page_html = response.text
+
+    canonical_url = extract_tiktok_canonical_url(
+        page_html,
+        final_url,
+    )
+
+    if canonical_url:
+        final_url = canonical_url
 
     photo_urls: list[str] = []
     music_url = None
@@ -583,6 +768,8 @@ def download_video(
         if file.is_file()
     }
 
+    download_url = resolve_tiktok_url(url)
+
     options: dict[str, Any] = {
         "outtmpl": template,
         "format": (
@@ -610,7 +797,7 @@ def download_video(
 
     with yt_dlp.YoutubeDL(options) as downloader:
         info = downloader.extract_info(
-            url,
+            download_url,
             download=True,
         )
 
@@ -658,6 +845,8 @@ def download_audio_source(
         if file.is_file()
     }
 
+    download_url = resolve_tiktok_url(url)
+
     options: dict[str, Any] = {
         "outtmpl": template,
 
@@ -701,7 +890,7 @@ def download_audio_source(
         options
     ) as downloader:
         info = downloader.extract_info(
-            url,
+            download_url,
             download=True,
         )
 
