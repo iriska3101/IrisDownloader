@@ -16,6 +16,20 @@ _ORIGINAL_STDERR = sys.stderr
 _INSTALLED = False
 
 
+_PUBLIC_PREFIXES = (
+    "IRISSAVE ",
+    "VIDEO ",
+    "YOUTUBE ",
+    "TIKTOK ",
+    "INSTAGRAM ",
+    "ERROR:",
+    "RuntimeError:",
+    "DownloadError:",
+    "TimeoutExpired:",
+    "ActivityIndicator ",
+)
+
+
 def _sanitize_url(match: re.Match[str]) -> str:
     raw = match.group(0)
     try:
@@ -49,6 +63,40 @@ def sanitize_line(text: str) -> str:
     return value[:4000]
 
 
+def _public_sanitize_line(text: str) -> str:
+    """Дополнительная очистка для публичного diagnostic endpoint."""
+    value = sanitize_line(text)
+
+    # В публичной диагностике URL не нужны вообще: домен/путь иногда
+    # содержат ID публикации или временные CDN-идентификаторы.
+    value = re.sub(
+        r"https?://[^\s'\"<>]+",
+        "[URL]",
+        value,
+    )
+
+    # Убираем временные/локальные пути и имена скачанных файлов.
+    value = re.sub(
+        r"(?:/tmp|/opt/render|/etc/secrets)/[^\s'\"<>]+",
+        "[PATH]",
+        value,
+    )
+
+    # YouTube/TikTok ID сами по себе не нужны для диагностики механизма.
+    value = re.sub(
+        r"\b[A-Za-z0-9_-]{11}\b",
+        "[MEDIA_ID]",
+        value,
+    )
+    value = re.sub(
+        r"\b\d{16,20}\b",
+        "[MEDIA_ID]",
+        value,
+    )
+
+    return value[:1800]
+
+
 def record_line(text: str) -> None:
     cleaned = sanitize_line(text.strip())
     if not cleaned:
@@ -63,6 +111,27 @@ def get_recent_logs(limit: int = 200) -> list[str]:
     safe_limit = max(1, min(limit, _MAX_LINES))
     with _LOCK:
         return list(_LINES)[-safe_limit:]
+
+
+def get_public_logs(limit: int = 120) -> list[str]:
+    """
+    Возвращает только технические строки, пригодные для публичного чтения.
+    Пользовательский текст, URL, локальные пути и media ID не выдаются.
+    """
+    safe_limit = max(1, min(limit, 150))
+
+    with _LOCK:
+        snapshot = list(_LINES)
+
+    result: list[str] = []
+    for line in snapshot:
+        # После timestamp идёт исходная диагностическая строка.
+        payload = line.split(" ", 1)[1] if " " in line else line
+        if not payload.startswith(_PUBLIC_PREFIXES):
+            continue
+        result.append(_public_sanitize_line(line))
+
+    return result[-safe_limit:]
 
 
 def get_debug_token() -> str | None:
