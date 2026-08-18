@@ -3,10 +3,14 @@ from typing import Any
 
 def get_tiktok_options() -> dict[str, Any]:
     """
-    Настройки TikTok.
+    Настройки загрузки TikTok.
 
-    Используем browser impersonation, потому что
-    TikTok часто блокирует обычные HTTP-запросы yt-dlp.
+    Не форсируем browser impersonation:
+    доступность конкретных targets зависит
+    от request handlers и curl_cffi в окружении Render.
+
+    TikTok direct fallback обрабатывается отдельно
+    в services/video_progress.py.
     """
     return {
         "format": (
@@ -24,5 +28,4 @@ def get_tiktok_options() -> dict[str, Any]:
             "hasaud",
         ],
         "merge_output_format": "mp4",
-        "impersonate": "chrome",
     }
