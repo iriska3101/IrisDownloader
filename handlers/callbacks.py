@@ -1,3 +1,4 @@
+import asyncio
 import tempfile
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from services.downloader import (
     download_audio_as_mp3,
     download_photos,
 )
+from services.github_diagnostics import publish_diagnostic_snapshot
 from utils.activity import ActivityIndicator
 from utils.retry import run_with_retry
 
@@ -240,6 +242,11 @@ async def handle_download_choice(
             f"{detailed_error[:2500]}"
         )
 
+        await asyncio.to_thread(
+            publish_diagnostic_snapshot,
+            detailed_error,
+        )
+
     finally:
         active_tasks.discard(task_key)
 
@@ -396,6 +403,11 @@ async def handle_search_choice(
             "❌ Не получилось скачать трек\n\n"
             "Причина:\n"
             f"{detailed_error[:2500]}"
+        )
+
+        await asyncio.to_thread(
+            publish_diagnostic_snapshot,
+            detailed_error,
         )
 
     finally:
