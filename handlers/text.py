@@ -24,21 +24,10 @@ async def show_link_menu(
     keyboard = InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton(
-                    "🎬 Видео",
-                    callback_data="download_video",
-                ),
-                InlineKeyboardButton(
-                    "🎵 MP3",
-                    callback_data="download_audio",
-                ),
+                InlineKeyboardButton("🎬 Видео", callback_data="download_video"),
+                InlineKeyboardButton("🎵 MP3", callback_data="download_audio"),
             ],
-            [
-                InlineKeyboardButton(
-                    "🖼 Фотографии",
-                    callback_data="download_photos",
-                )
-            ],
+            [InlineKeyboardButton("🖼 Фотографии", callback_data="download_photos")],
         ]
     )
 
@@ -48,13 +37,13 @@ async def show_link_menu(
     )
 
     key = f"url_{message.message_id}"
+    context.user_data[key] = url
 
-    # В группе кнопки может нажать любой участник, поэтому ссылка
-    # хранится на уровне чата. В личке сохраняем прежнее поведение.
-    if update.message.chat.type in ("group", "supergroup"):
-        context.chat_data[key] = url
-    else:
-        context.user_data[key] = url
+    # Общая карта нужна для групп: кнопку под сообщением может нажать
+    # не только автор ссылки, а любой участник чата.
+    context.bot_data.setdefault("group_urls", {})[
+        f"{message.chat_id}:{message.message_id}"
+    ] = url
 
 
 async def search_music(
@@ -66,9 +55,7 @@ async def search_music(
     if update.message is None:
         return
 
-    status = await update.message.reply_text(
-        "Ищу музыку… 🔎"
-    )
+    status = await update.message.reply_text("Ищу музыку… 🔎")
 
     try:
         results = await run_with_retry(
@@ -80,60 +67,36 @@ async def search_music(
         if not results:
             await status.edit_text(
                 "Ничего не нашла 😔\n"
-                "Попробуй точнее написать название "
-                "и исполнителя."
+                "Попробуй точнее написать название и исполнителя."
             )
             return
 
         token = uuid.uuid4().hex[:10]
-
-        context.user_data[
-            f"search_{token}"
-        ] = results
-
-        buttons: list[
-            list[InlineKeyboardButton]
-        ] = []
+        context.user_data[f"search_{token}"] = results
+        buttons: list[list[InlineKeyboardButton]] = []
 
         for index, result in enumerate(results):
             title = result["title"]
             uploader = result["uploader"]
-
-            if uploader:
-                label = (
-                    f"{index + 1}. "
-                    f"{title} — {uploader}"
-                )
-            else:
-                label = (
-                    f"{index + 1}. {title}"
-                )
-
+            label = (
+                f"{index + 1}. {title} — {uploader}"
+                if uploader
+                else f"{index + 1}. {title}"
+            )
             buttons.append(
-                [
-                    InlineKeyboardButton(
-                        label[:60],
-                        callback_data=(
-                            f"search_audio:"
-                            f"{token}:{index}"
-                        ),
-                    )
-                ]
+                [InlineKeyboardButton(
+                    label[:60],
+                    callback_data=f"search_audio:{token}:{index}",
+                )]
             )
 
         await status.edit_text(
             "Выбери нужный вариант:",
-            reply_markup=InlineKeyboardMarkup(
-                buttons
-            ),
+            reply_markup=InlineKeyboardMarkup(buttons),
         )
 
     except Exception as error:
-        print(
-            f"Search error: {error}",
-            flush=True,
-        )
-
+        print(f"Search error: {error}", flush=True)
         await status.edit_text(
             "Не получилось выполнить поиск 😔\n\n"
             f"Причина:\n{str(error)[:1500]}"
@@ -148,37 +111,23 @@ async def handle_text(
     if update.message is None:
         return
 
-    text = (
-        update.message.text or ""
-    ).strip()
-
+    text = (update.message.text or "").strip()
     if not text:
         return
 
     url = find_link(text)
-
     if url:
-        await show_link_menu(
-            update,
-            context,
-            url,
-        )
+        await show_link_menu(update, context, url)
         return
 
-    # В группах IriSSave не вмешивается в обычную переписку.
-    # Он реагирует только на сообщения, содержащие ссылку.
+    # В группе обычную переписку полностью игнорируем.
     if update.message.chat.type in ("group", "supergroup"):
         return
 
     if len(text) < 2:
         await update.message.reply_text(
-            "Напиши название песни "
-            "и исполнителя."
+            "Напиши название песни и исполнителя."
         )
         return
 
-    await search_music(
-        update,
-        context,
-        text,
-    )
+    await search_music(update, context, text)
