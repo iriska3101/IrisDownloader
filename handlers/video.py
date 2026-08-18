@@ -2,6 +2,9 @@ import asyncio
 
 from telegram import Message
 
+from services.tiktok_api_fallback import (
+    download_tiktok_via_tikwm,
+)
 from services.video_progress import (
     download_video_with_progress,
 )
@@ -17,8 +20,8 @@ async def process_video_download(
     """
     Скачивает видео и временно отправляет его как документ.
 
-    Дополнительно выводит в Render Logs этап,
-    на котором находится обработка.
+    Для TikTok, если прямой способ и yt-dlp не сработали,
+    пробует отдельный резервный API.
     """
     progress = DownloadProgress(
         message=message,
@@ -41,13 +44,49 @@ async def process_video_download(
     )
 
     try:
-        video_path = await run_with_retry(
-            download_video_with_progress,
-            url,
-            folder,
-            progress.hook,
-            status_message=message,
-        )
+        try:
+            video_path = await run_with_retry(
+                download_video_with_progress,
+                url,
+                folder,
+                progress.hook,
+                status_message=message,
+            )
+
+        except Exception as primary_error:
+            if "tiktok.com" not in url.lower():
+                raise
+
+            print(
+                "VIDEO HANDLER: основной TikTok downloader не сработал — "
+                "запускаю TikWM fallback",
+                flush=True,
+            )
+            print(
+                f"VIDEO HANDLER: primary error: "
+                f"{type(primary_error).__name__}: {primary_error}",
+                flush=True,
+            )
+
+            try:
+                video_path = await asyncio.to_thread(
+                    download_tiktok_via_tikwm,
+                    url,
+                    folder,
+                    progress.hook,
+                )
+
+            except Exception as fallback_error:
+                print(
+                    "VIDEO HANDLER: TikWM fallback тоже не сработал: "
+                    f"{type(fallback_error).__name__}: {fallback_error}",
+                    flush=True,
+                )
+
+                raise RuntimeError(
+                    "TikTok не удалось скачать ни основным способом, "
+                    "ни через резервный TikWM"
+                ) from fallback_error
 
         print(
             f"VIDEO HANDLER: загрузка завершена — {video_path}",
