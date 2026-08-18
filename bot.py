@@ -29,30 +29,22 @@ from services.diagnostics import (
     install_diagnostic_capture,
     record_line,
 )
+from services.formats.youtube import warm_youtube_provider
 
 
 class DebugLogsHandler(tornado.web.RequestHandler):
-    """Отдаёт последние безопасно очищенные логи IriSSave по токену."""
-
     def set_default_headers(self) -> None:
         self.set_header("Content-Type", "application/json; charset=utf-8")
         self.set_header("Cache-Control", "no-store")
 
     def get(self) -> None:
         expected = get_debug_token()
-
         if not expected:
             self.set_status(503)
-            self.finish(
-                {
-                    "ok": False,
-                    "error": "IRISSAVE_DEBUG_TOKEN is not configured",
-                }
-            )
+            self.finish({"ok": False, "error": "IRISSAVE_DEBUG_TOKEN is not configured"})
             return
 
         supplied = self.get_query_argument("token", default="")
-
         if not supplied:
             authorization = self.request.headers.get("Authorization", "")
             if authorization.startswith("Bearer "):
@@ -68,22 +60,10 @@ class DebugLogsHandler(tornado.web.RequestHandler):
         except ValueError:
             limit = 200
 
-        self.finish(
-            {
-                "ok": True,
-                "lines": get_recent_logs(limit),
-            }
-        )
+        self.finish({"ok": True, "lines": get_recent_logs(limit)})
 
 
 class PublicDebugHandler(tornado.web.RequestHandler):
-    """
-    Публичная диагностика без токена.
-
-    Здесь выдаются только allowlist-технические строки после усиленной
-    очистки: без URL, media ID, локальных путей, cookies и токенов.
-    """
-
     def set_default_headers(self) -> None:
         self.set_header("Content-Type", "application/json; charset=utf-8")
         self.set_header("Cache-Control", "no-store")
@@ -106,10 +86,6 @@ class PublicDebugHandler(tornado.web.RequestHandler):
 
 
 async def _attach_debug_route(application: Application) -> None:
-    """
-    Добавляет diagnostic routes в тот же Tornado-сервер, который PTB уже
-    использует для Telegram webhook. Поэтому второй порт Render не нужен.
-    """
     updater = application.updater
     if updater is None:
         record_line("IRISSAVE DIAGNOSTICS: updater недоступен")
@@ -138,10 +114,24 @@ async def _attach_debug_route(application: Application) -> None:
     record_line("IRISSAVE DIAGNOSTICS: не удалось подключить debug routes")
 
 
+async def _warm_youtube() -> None:
+    try:
+        await asyncio.to_thread(warm_youtube_provider)
+    except Exception as error:
+        record_line(
+            "YOUTUBE POT WARMUP: ошибка | "
+            f"{type(error).__name__}: {error}"
+        )
+
+
 async def _post_init(application: Application) -> None:
     asyncio.create_task(
         _attach_debug_route(application),
         name="irissave-debug-route",
+    )
+    asyncio.create_task(
+        _warm_youtube(),
+        name="irissave-youtube-warmup",
     )
 
 
@@ -155,27 +145,16 @@ def main() -> None:
         .build()
     )
 
+    application.add_handler(CommandHandler("start", start))
     application.add_handler(
-        CommandHandler(
-            "start",
-            start,
-        )
+        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text)
     )
-
-    application.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            handle_text,
-        )
-    )
-
     application.add_handler(
         CallbackQueryHandler(
             handle_download_choice,
             pattern=r"^download_(video|audio|photos)$",
         )
     )
-
     application.add_handler(
         CallbackQueryHandler(
             handle_search_choice,
