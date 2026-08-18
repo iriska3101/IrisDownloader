@@ -3,8 +3,10 @@ from typing import Any
 
 def get_tiktok_options() -> dict[str, Any]:
     """
-    Проверенные настройки TikTok.
-    Видео скачивается со звуком.
+    Настройки TikTok.
+
+    Используем browser impersonation, потому что
+    TikTok часто блокирует обычные HTTP-запросы yt-dlp.
     """
     return {
         "format": (
@@ -22,4 +24,5 @@ def get_tiktok_options() -> dict[str, Any]:
             "hasaud",
         ],
         "merge_output_format": "mp4",
+        "impersonate": "chrome",
     }
