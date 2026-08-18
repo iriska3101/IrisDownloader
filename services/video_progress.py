@@ -1,9 +1,18 @@
+import html
 import os
+import re
 from pathlib import Path
 from typing import Any, Callable
 
+import httpx
 import yt_dlp
 
+from config import BROWSER_HEADERS
+from services.downloader import (
+    extract_json_objects,
+    first_url,
+    resolve_tiktok_url,
+)
 from services.formats.common import get_platform_options
 
 
@@ -146,6 +155,288 @@ def _print_download_info(
     )
 
 
+def _extract_tiktok_video_urls_from_data(
+    data: Any,
+) -> list[str]:
+    """
+    Ищет прямые URL видео в JSON TikTok.
+    Сначала собирает playAddr/playUrl, затем downloadAddr.
+    """
+    preferred: list[str] = []
+    fallback: list[str] = []
+
+    play_keys = {
+        "playaddr",
+        "playurl",
+        "playuri",
+        "play",
+    }
+
+    download_keys = {
+        "downloadaddr",
+        "downloadurl",
+        "downloaduri",
+    }
+
+    def normalize(key: str) -> str:
+        return (
+            key.replace("-", "")
+            .replace("_", "")
+            .lower()
+        )
+
+    def walk(
+        value: Any,
+        inside_video: bool = False,
+    ) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                normalized = normalize(str(key))
+
+                now_inside_video = (
+                    inside_video
+                    or normalized
+                    in {
+                        "video",
+                        "videoinfo",
+                        "videodetail",
+                        "videoresource",
+                        "bitrateinfo",
+                        "bitrateinfos",
+                    }
+                )
+
+                if now_inside_video:
+                    if normalized in play_keys:
+                        candidate = first_url(child)
+
+                        if candidate:
+                            preferred.append(candidate)
+
+                    elif normalized in download_keys:
+                        candidate = first_url(child)
+
+                        if candidate:
+                            fallback.append(candidate)
+
+                walk(
+                    child,
+                    now_inside_video,
+                )
+
+        elif isinstance(value, list):
+            for child in value:
+                walk(
+                    child,
+                    inside_video,
+                )
+
+    walk(data)
+
+    return list(
+        dict.fromkeys(
+            preferred + fallback
+        )
+    )
+
+
+def _extract_tiktok_video_urls_from_html(
+    page_html: str,
+) -> list[str]:
+    """
+    Запасной поиск прямых URL, если TikTok поменял
+    структуру JSON, но оставил адрес видео в HTML.
+    """
+    decoded = html.unescape(page_html)
+    decoded = decoded.replace("\\u002F", "/")
+    decoded = decoded.replace("\\u0026", "&")
+    decoded = decoded.replace("\\/", "/")
+
+    patterns = [
+        r'"playAddr"\s*:\s*"([^"]+)"',
+        r'"playUrl"\s*:\s*"([^"]+)"',
+        r'"downloadAddr"\s*:\s*"([^"]+)"',
+    ]
+
+    found: list[str] = []
+
+    for pattern in patterns:
+        for match in re.findall(
+            pattern,
+            decoded,
+            flags=re.IGNORECASE,
+        ):
+            candidate = (
+                match.replace("\\u002F", "/")
+                .replace("\\u0026", "&")
+                .replace("\\/", "/")
+            )
+
+            if candidate.startswith("http"):
+                found.append(candidate)
+
+    return list(dict.fromkeys(found))
+
+
+def _download_tiktok_direct(
+    url: str,
+    folder_path: Path,
+    progress_hook: Callable[
+        [dict[str, Any]],
+        None,
+    ],
+) -> Path:
+    """
+    Для TikTok сначала пытается получить прямой видеофайл
+    из данных страницы без yt-dlp.
+    """
+    resolved_url = resolve_tiktok_url(url)
+
+    timeout = httpx.Timeout(
+        connect=20.0,
+        read=60.0,
+        write=20.0,
+        pool=20.0,
+    )
+
+    with httpx.Client(
+        headers=BROWSER_HEADERS,
+        follow_redirects=True,
+        timeout=timeout,
+    ) as client:
+        response = client.get(resolved_url)
+        response.raise_for_status()
+
+        final_url = str(response.url)
+        page_html = response.text
+
+    video_urls: list[str] = []
+
+    for data in extract_json_objects(page_html):
+        video_urls.extend(
+            _extract_tiktok_video_urls_from_data(data)
+        )
+
+    video_urls.extend(
+        _extract_tiktok_video_urls_from_html(
+            page_html
+        )
+    )
+
+    video_urls = list(
+        dict.fromkeys(video_urls)
+    )
+
+    if not video_urls:
+        raise RuntimeError(
+            "TikTok не отдал прямой адрес видео"
+        )
+
+    headers = {
+        **BROWSER_HEADERS,
+        "Referer": final_url,
+    }
+
+    last_error: Exception | None = None
+
+    with httpx.Client(
+        headers=headers,
+        follow_redirects=True,
+        timeout=httpx.Timeout(
+            connect=20.0,
+            read=120.0,
+            write=20.0,
+            pool=20.0,
+        ),
+    ) as client:
+        for index, video_url in enumerate(
+            video_urls,
+            start=1,
+        ):
+            try:
+                with client.stream(
+                    "GET",
+                    video_url,
+                ) as media_response:
+                    media_response.raise_for_status()
+
+                    total = int(
+                        media_response.headers.get(
+                            "content-length",
+                            "0",
+                        )
+                        or 0
+                    )
+
+                    path = (
+                        folder_path
+                        / f"tiktok-direct-{index}.mp4"
+                    )
+
+                    downloaded = 0
+
+                    with path.open("wb") as file:
+                        for chunk in (
+                            media_response.iter_bytes(
+                                chunk_size=256 * 1024
+                            )
+                        ):
+                            if not chunk:
+                                continue
+
+                            file.write(chunk)
+                            downloaded += len(chunk)
+
+                            progress_hook(
+                                {
+                                    "status": "downloading",
+                                    "downloaded_bytes": downloaded,
+                                    "total_bytes": total or None,
+                                    "filename": str(path),
+                                }
+                            )
+
+                    if (
+                        path.exists()
+                        and path.stat().st_size > 100_000
+                    ):
+                        progress_hook(
+                            {
+                                "status": "finished",
+                                "downloaded_bytes": (
+                                    path.stat().st_size
+                                ),
+                                "total_bytes": (
+                                    path.stat().st_size
+                                ),
+                                "filename": str(path),
+                            }
+                        )
+
+                        print(
+                            "TIKTOK DIRECT: "
+                            f"скачан {path.name}, "
+                            f"{path.stat().st_size} bytes",
+                            flush=True,
+                        )
+
+                        return path
+
+                    path.unlink(missing_ok=True)
+
+            except (
+                httpx.HTTPError,
+                OSError,
+            ) as error:
+                last_error = error
+                continue
+
+    raise RuntimeError(
+        "TikTok нашёл адрес видео, "
+        "но не разрешил скачать файл"
+    ) from last_error
+
+
 def download_video_with_progress(
     url: str,
     folder: str,
@@ -157,6 +448,10 @@ def download_video_with_progress(
     """
     Загружает видео с отдельными настройками
     для TikTok, Instagram и YouTube.
+
+    TikTok:
+    1. сначала прямой файл из JSON/HTML страницы;
+    2. если это не сработало — fallback на yt-dlp.
     """
     folder_path = Path(folder)
 
@@ -173,6 +468,42 @@ def download_video_with_progress(
         f"IRISSAVE PLATFORM: {platform}",
         flush=True,
     )
+
+    if platform == "TIKTOK":
+        try:
+            print(
+                "TIKTOK DIRECT: пробую прямой способ",
+                flush=True,
+            )
+
+            direct_path = _download_tiktok_direct(
+                url=url,
+                folder_path=folder_path,
+                progress_hook=progress_hook,
+            )
+
+            if (
+                direct_path.stat().st_size
+                > TELEGRAM_SAFE_SIZE
+            ):
+                raise RuntimeError(
+                    "Видео TikTok больше 48 МБ"
+                )
+
+            return direct_path
+
+        except Exception as direct_error:
+            print(
+                "TIKTOK DIRECT: не сработал — "
+                f"{type(direct_error).__name__}: "
+                f"{direct_error}",
+                flush=True,
+            )
+
+            print(
+                "TIKTOK FALLBACK: запускаю yt-dlp",
+                flush=True,
+            )
 
     template = os.path.join(
         folder,
@@ -199,6 +530,7 @@ def download_video_with_progress(
         "progress_hooks": [
             progress_hook,
         ],
+        "http_headers": BROWSER_HEADERS,
     }
 
     options.update(
@@ -245,6 +577,12 @@ def download_video_with_progress(
             )
 
     except yt_dlp.utils.DownloadError as error:
+        if platform == "TIKTOK":
+            raise RuntimeError(
+                "TikTok временно не отдал видео "
+                "ни прямым способом, ни через yt-dlp"
+            ) from error
+
         raise RuntimeError(
             str(error)
         ) from error
