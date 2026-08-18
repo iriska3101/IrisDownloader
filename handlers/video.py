@@ -1,5 +1,8 @@
 import asyncio
+import subprocess
+from pathlib import Path
 
+import imageio_ffmpeg
 from telegram import Message
 
 from services.tiktok_api_fallback import (
@@ -10,6 +13,89 @@ from services.video_progress import (
 )
 from utils.progress import DownloadProgress
 from utils.retry import run_with_retry
+
+
+def _normalize_instagram_video(video_path: Path) -> Path:
+    """
+    Нормализует Instagram-видео перед отправкой в Telegram.
+
+    Некоторые Reels приходят с нестандартным SAR/DAR. На iPhone
+    Telegram может интерпретировать такие метаданные как растянутое
+    изображение. Перекодируем только видеопоток с квадратным пикселем
+    (SAR=1), сохраняя исходные ширину/высоту и звук.
+    """
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    output_path = video_path.with_name(
+        f"{video_path.stem}-telegram.mp4"
+    )
+
+    command = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(video_path),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
+        "-vf",
+        "setsar=1",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "20",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "160k",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+
+    print(
+        "INSTAGRAM NORMALIZE: исправляю SAR/DAR для Telegram",
+        flush=True,
+    )
+
+    result = subprocess.run(
+        command,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+
+    if result.returncode != 0:
+        output_path.unlink(missing_ok=True)
+        raise RuntimeError(
+            "Не удалось нормализовать Instagram-видео: "
+            f"{result.stderr.strip()[-1200:]}"
+        )
+
+    if (
+        not output_path.exists()
+        or output_path.stat().st_size <= 0
+    ):
+        raise RuntimeError(
+            "После нормализации Instagram-видео файл не создан"
+        )
+
+    print(
+        "INSTAGRAM NORMALIZE: готово | "
+        f"size={output_path.stat().st_size}",
+        flush=True,
+    )
+
+    return output_path
 
 
 async def process_video_download(
@@ -126,6 +212,12 @@ async def process_video_download(
     if not video_path.exists():
         raise FileNotFoundError(
             "Скачанный видеофайл не найден"
+        )
+
+    if "instagram.com" in url.lower():
+        video_path = await asyncio.to_thread(
+            _normalize_instagram_video,
+            video_path,
         )
 
     print(
