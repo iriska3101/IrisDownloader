@@ -17,19 +17,79 @@ from utils.retry import run_with_retry
 
 def _normalize_instagram_video(video_path: Path) -> Path:
     """
-    Нормализует Instagram-видео перед отправкой в Telegram.
+    Быстро нормализует Instagram-видео перед отправкой в Telegram.
 
-    Некоторые Reels приходят с нестандартным SAR/DAR. На iPhone
-    Telegram может интерпретировать такие метаданные как растянутое
-    изображение. Перекодируем только видеопоток с квадратным пикселем
-    (SAR=1), сохраняя исходные ширину/высоту и звук.
+    Сначала исправляем SAR прямо в H.264 bitstream без перекодирования.
+    Это занимает секунды и не нагружает бесплатный Render.
+    Если поток не H.264 или быстрый способ не поддерживается,
+    используем обычное перекодирование как резервный вариант.
     """
     ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
     output_path = video_path.with_name(
         f"{video_path.stem}-telegram.mp4"
     )
 
-    command = [
+    fast_command = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(video_path),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
+        "-c",
+        "copy",
+        "-bsf:v",
+        "h264_metadata=sample_aspect_ratio=1/1",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+
+    print(
+        "INSTAGRAM NORMALIZE: быстрый SAR fix без перекодирования",
+        flush=True,
+    )
+
+    try:
+        fast_result = subprocess.run(
+            fast_command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=45,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        fast_result = None
+
+    if (
+        fast_result is not None
+        and fast_result.returncode == 0
+        and output_path.exists()
+        and output_path.stat().st_size > 0
+    ):
+        print(
+            "INSTAGRAM NORMALIZE: быстрый SAR fix готов | "
+            f"size={output_path.stat().st_size}",
+            flush=True,
+        )
+        return output_path
+
+    output_path.unlink(missing_ok=True)
+
+    if fast_result is not None and fast_result.stderr.strip():
+        print(
+            "INSTAGRAM NORMALIZE: быстрый способ не подошёл | "
+            f"{fast_result.stderr.strip()[-600:]}",
+            flush=True,
+        )
+
+    fallback_command = [
         ffmpeg,
         "-hide_banner",
         "-loglevel",
@@ -46,9 +106,9 @@ def _normalize_instagram_video(video_path: Path) -> Path:
         "-c:v",
         "libx264",
         "-preset",
-        "veryfast",
+        "ultrafast",
         "-crf",
-        "20",
+        "21",
         "-pix_fmt",
         "yuv420p",
         "-c:a",
@@ -61,12 +121,12 @@ def _normalize_instagram_video(video_path: Path) -> Path:
     ]
 
     print(
-        "INSTAGRAM NORMALIZE: исправляю SAR/DAR для Telegram",
+        "INSTAGRAM NORMALIZE: fallback-перекодирование",
         flush=True,
     )
 
     result = subprocess.run(
-        command,
+        fallback_command,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         text=True,
@@ -90,7 +150,7 @@ def _normalize_instagram_video(video_path: Path) -> Path:
         )
 
     print(
-        "INSTAGRAM NORMALIZE: готово | "
+        "INSTAGRAM NORMALIZE: fallback готов | "
         f"size={output_path.stat().st_size}",
         flush=True,
     )
@@ -215,6 +275,10 @@ async def process_video_download(
         )
 
     if "instagram.com" in url.lower():
+        await message.edit_text(
+            "⬇️ IriSSave\n\n"
+            "⚙️ Подготавливаю видео…"
+        )
         video_path = await asyncio.to_thread(
             _normalize_instagram_video,
             video_path,
