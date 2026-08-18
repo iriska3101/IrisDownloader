@@ -48,7 +48,9 @@ def get_platform_options(
     if "tiktok.com" in url:
         return (
             "TIKTOK",
-            get_tiktok_options(),
+            _add_cookies_if_available(
+                get_tiktok_options()
+            ),
         )
 
     if "instagram.com" in url:
