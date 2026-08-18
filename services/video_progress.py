@@ -327,7 +327,7 @@ def _looks_like_mp4(
             "rb"
         ) as file:
             header = file.read(
-                64
+                4096
             )
 
     except OSError:
@@ -362,13 +362,16 @@ def _validate_video(
             f"{size} bytes",
         )
 
-    if not _looks_like_mp4(
+    has_ftyp = _looks_like_mp4(
         path
-    ):
-        return (
-            False,
-            "в заголовке файла "
-            "нет MP4-сигнатуры ftyp",
+    )
+
+    if not has_ftyp:
+        print(
+            "validation-note="
+            "MP4-сигнатура ftyp не найдена в первых 4096 байтах; "
+            "проверяю файл через ffmpeg",
+            flush=True,
         )
 
     ffmpeg = (
@@ -434,7 +437,8 @@ def _validate_video(
 
     return (
         True,
-        "ok",
+        "ok (ffmpeg; ftyp="
+        f"{'yes' if has_ftyp else 'no'})",
     )
 
 
