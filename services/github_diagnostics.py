@@ -15,7 +15,10 @@ GITHUB_DIAGNOSTICS_PATH = "diagnostics/latest.json"
 
 
 def _github_token() -> str | None:
-    token = os.getenv("IRISSAVE_GITHUB_TOKEN", "").strip()
+    token = (
+        os.getenv("IRISSAVE_GITHUB_TOKEN", "").strip()
+        or os.getenv("GITHUB_TOKEN", "").strip()
+    )
     return token or None
 
 
