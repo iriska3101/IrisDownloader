@@ -24,6 +24,7 @@ from handlers.messages import start
 from handlers.text import handle_text
 from services.diagnostics import (
     get_debug_token,
+    get_public_logs,
     get_recent_logs,
     install_diagnostic_capture,
     record_line,
@@ -31,7 +32,7 @@ from services.diagnostics import (
 
 
 class DebugLogsHandler(tornado.web.RequestHandler):
-    """Отдаёт последние безопасно очищенные логи IriSSave."""
+    """Отдаёт последние безопасно очищенные логи IriSSave по токену."""
 
     def set_default_headers(self) -> None:
         self.set_header("Content-Type", "application/json; charset=utf-8")
@@ -75,9 +76,38 @@ class DebugLogsHandler(tornado.web.RequestHandler):
         )
 
 
+class PublicDebugHandler(tornado.web.RequestHandler):
+    """
+    Публичная диагностика без токена.
+
+    Здесь выдаются только allowlist-технические строки после усиленной
+    очистки: без URL, media ID, локальных путей, cookies и токенов.
+    """
+
+    def set_default_headers(self) -> None:
+        self.set_header("Content-Type", "application/json; charset=utf-8")
+        self.set_header("Cache-Control", "no-store")
+        self.set_header("X-Robots-Tag", "noindex, nofollow, noarchive")
+
+    def get(self) -> None:
+        try:
+            limit = int(self.get_query_argument("limit", default="120"))
+        except ValueError:
+            limit = 120
+
+        self.finish(
+            {
+                "ok": True,
+                "service": "IriSSave",
+                "diagnostics": "public-safe",
+                "lines": get_public_logs(limit),
+            }
+        )
+
+
 async def _attach_debug_route(application: Application) -> None:
     """
-    Добавляет /debug/logs в тот же Tornado-сервер, который PTB уже
+    Добавляет diagnostic routes в тот же Tornado-сервер, который PTB уже
     использует для Telegram webhook. Поэтому второй порт Render не нужен.
     """
     updater = application.updater
@@ -94,18 +124,18 @@ async def _attach_debug_route(application: Application) -> None:
             web_app.add_handlers(
                 r".*$",
                 [
-                    (
-                        r"/debug/logs/?",
-                        DebugLogsHandler,
-                    )
+                    (r"/debug/logs/?", DebugLogsHandler),
+                    (r"/debug/status/?", PublicDebugHandler),
                 ],
             )
-            record_line("IRISSAVE DIAGNOSTICS: /debug/logs attached")
+            record_line(
+                "IRISSAVE DIAGNOSTICS: /debug/logs and /debug/status attached"
+            )
             return
 
         await asyncio.sleep(0.1)
 
-    record_line("IRISSAVE DIAGNOSTICS: не удалось подключить /debug/logs")
+    record_line("IRISSAVE DIAGNOSTICS: не удалось подключить debug routes")
 
 
 async def _post_init(application: Application) -> None:
