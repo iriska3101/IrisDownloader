@@ -17,6 +17,56 @@ from utils.activity import ActivityIndicator
 from utils.retry import run_with_retry
 
 
+def build_error_details(
+    error: Exception,
+) -> str:
+    """
+    Формирует подробное описание ошибки.
+
+    Показывает:
+    - тип исключения;
+    - текст или repr, если текст пустой;
+    - внутреннюю причину (__cause__ / __context__).
+    """
+    error_type = type(error).__name__
+    error_text = str(error).strip()
+    error_repr = repr(error)
+
+    main_text = (
+        error_text
+        if error_text
+        else error_repr
+    )
+
+    details = (
+        f"{error_type}: {main_text}"
+    )
+
+    cause = (
+        error.__cause__
+        or error.__context__
+    )
+
+    if cause is not None:
+        cause_type = type(cause).__name__
+        cause_text = str(cause).strip()
+        cause_repr = repr(cause)
+
+        cause_value = (
+            cause_text
+            if cause_text
+            else cause_repr
+        )
+
+        details += (
+            "\n\n"
+            "Внутренняя причина:\n"
+            f"{cause_type}: {cause_value}"
+        )
+
+    return details
+
+
 async def handle_download_choice(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -156,19 +206,38 @@ async def handle_download_choice(
                 )
 
     except Exception as error:
-        await indicator.stop()
+        try:
+            await indicator.stop()
+        except Exception as stop_error:
+            print(
+                "ActivityIndicator stop error: "
+                f"{type(stop_error).__name__}: "
+                f"{stop_error!r}",
+                flush=True,
+            )
 
-        error_text = str(error)
+        detailed_error = build_error_details(
+            error
+        )
 
         print(
-            f"Download error: {error_text}",
+            "\n========== IRISSAVE DOWNLOAD ERROR ==========",
+            flush=True,
+        )
+        print(
+            detailed_error,
+            flush=True,
+        )
+        print(
+            "=============================================\n",
             flush=True,
         )
 
         await message.edit_text(
             "⬇️ IriSSave\n\n"
             "❌ Не получилось скачать\n\n"
-            f"Причина:\n{error_text[:2500]}"
+            "Причина:\n"
+            f"{detailed_error[:2500]}"
         )
 
     finally:
@@ -295,19 +364,38 @@ async def handle_search_choice(
             )
 
     except Exception as error:
-        await indicator.stop()
+        try:
+            await indicator.stop()
+        except Exception as stop_error:
+            print(
+                "ActivityIndicator stop error: "
+                f"{type(stop_error).__name__}: "
+                f"{stop_error!r}",
+                flush=True,
+            )
 
-        error_text = str(error)
+        detailed_error = build_error_details(
+            error
+        )
 
         print(
-            f"Search download error: {error_text}",
+            "\n========== IRISSAVE SEARCH ERROR ==========",
+            flush=True,
+        )
+        print(
+            detailed_error,
+            flush=True,
+        )
+        print(
+            "===========================================\n",
             flush=True,
         )
 
         await message.edit_text(
             "⬇️ IriSSave\n\n"
             "❌ Не получилось скачать трек\n\n"
-            f"Причина:\n{error_text[:2500]}"
+            "Причина:\n"
+            f"{detailed_error[:2500]}"
         )
 
     finally:
