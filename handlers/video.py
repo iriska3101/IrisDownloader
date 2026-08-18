@@ -18,10 +18,10 @@ async def process_video_download(
     folder: str,
 ) -> None:
     """
-    Скачивает видео и временно отправляет его как документ.
+    Скачивает видео и отправляет его в Telegram как обычное видео.
 
     Для TikTok, если прямой способ и yt-dlp не сработали,
-    пробует отдельный резервный API.
+    пробует отдельный резервный TikWM API.
     """
     progress = DownloadProgress(
         message=message,
@@ -63,7 +63,7 @@ async def process_video_download(
                 flush=True,
             )
             print(
-                f"VIDEO HANDLER: primary error: "
+                "VIDEO HANDLER: primary error: "
                 f"{type(primary_error).__name__}: {primary_error}",
                 flush=True,
             )
@@ -135,24 +135,22 @@ async def process_video_download(
 
     await message.edit_text(
         "⬇️ IriSSave\n\n"
-        "📤 Отправляю тестовый файл…"
+        "📤 Отправляю видео…"
     )
 
     print(
-        "VIDEO HANDLER: начинаю отправку документа",
+        "VIDEO HANDLER: начинаю отправку видео",
         flush=True,
     )
 
     try:
         with video_path.open("rb") as video_file:
             await asyncio.wait_for(
-                message.reply_document(
-                    document=video_file,
+                message.reply_video(
+                    video=video_file,
                     filename=video_path.name,
-                    caption=(
-                        "Тестовый файл IriSSave\n"
-                        "Проверяем пропорции и наличие звука"
-                    ),
+                    caption="⬇️ Скачано через IriSSave",
+                    supports_streaming=True,
                     write_timeout=300,
                     read_timeout=300,
                     connect_timeout=60,
@@ -163,22 +161,22 @@ async def process_video_download(
 
     except asyncio.TimeoutError as error:
         print(
-            "VIDEO HANDLER: отправка документа превысила 360 секунд",
+            "VIDEO HANDLER: отправка видео превысила 360 секунд",
             flush=True,
         )
 
         raise RuntimeError(
-            "Telegram слишком долго отправлял видеофайл"
+            "Telegram слишком долго отправлял видео"
         ) from error
 
     print(
-        "VIDEO HANDLER: документ отправлен",
+        "VIDEO HANDLER: видео отправлено",
         flush=True,
     )
 
     await message.edit_text(
         "⬇️ IriSSave\n\n"
-        "✅ Тестовый файл отправлен"
+        "✅ Готово"
     )
 
     print(
