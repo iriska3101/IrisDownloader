@@ -4,6 +4,7 @@ import re
 import subprocess
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 import imageio_ffmpeg
@@ -27,6 +28,27 @@ VIDEO_EXTENSIONS = {
     ".webm",
     ".m4v",
 }
+
+
+def _safe_url(url: str) -> str:
+    """
+    Убирает query и fragment перед выводом URL в Render Logs.
+    """
+    try:
+        parts = urlsplit(url)
+
+        return urlunsplit(
+            (
+                parts.scheme,
+                parts.netloc,
+                parts.path,
+                "",
+                "",
+            )
+        )
+
+    except Exception:
+        return url[:300]
 
 
 def _find_downloaded_video(
@@ -75,29 +97,43 @@ def _print_download_info(
         "\n========== IRISSAVE DIAGNOSTIC ==========",
         flush=True,
     )
-    print(f"Platform: {platform}", flush=True)
-    print(f"File: {video_path.name}", flush=True)
+
+    print(
+        f"Platform: {platform}",
+        flush=True,
+    )
+
+    print(
+        f"File: {video_path.name}",
+        flush=True,
+    )
+
     print(
         f"Size: {video_path.stat().st_size} bytes",
         flush=True,
     )
+
     print(
         f"Format ID: {info.get('format_id')}",
         flush=True,
     )
+
     print(
         f"Extension: {info.get('ext')}",
         flush=True,
     )
+
     print(
         f"Resolution: "
         f"{info.get('width')}x{info.get('height')}",
         flush=True,
     )
+
     print(
         f"Video codec: {info.get('vcodec')}",
         flush=True,
     )
+
     print(
         f"Audio codec: {info.get('acodec')}",
         flush=True,
@@ -109,7 +145,10 @@ def _print_download_info(
     )
 
     if requested_formats:
-        print("Requested formats:", flush=True)
+        print(
+            "Requested formats:",
+            flush=True,
+        )
 
         for item in requested_formats:
             if not isinstance(item, dict):
@@ -164,7 +203,9 @@ def _extract_tiktok_video_urls_from_data(
     ) -> None:
         if isinstance(value, dict):
             for key, child in value.items():
-                normalized = normalize(str(key))
+                normalized = normalize(
+                    str(key)
+                )
 
                 now_inside_video = (
                     inside_video
@@ -181,16 +222,24 @@ def _extract_tiktok_video_urls_from_data(
 
                 if now_inside_video:
                     if normalized in play_keys:
-                        candidate = first_url(child)
+                        candidate = first_url(
+                            child
+                        )
 
                         if candidate:
-                            preferred.append(candidate)
+                            preferred.append(
+                                candidate
+                            )
 
                     elif normalized in download_keys:
-                        candidate = first_url(child)
+                        candidate = first_url(
+                            child
+                        )
 
                         if candidate:
-                            fallback.append(candidate)
+                            fallback.append(
+                                candidate
+                            )
 
                 walk(
                     child,
@@ -216,10 +265,24 @@ def _extract_tiktok_video_urls_from_data(
 def _extract_tiktok_video_urls_from_html(
     page_html: str,
 ) -> list[str]:
-    decoded = html.unescape(page_html)
-    decoded = decoded.replace("\\u002F", "/")
-    decoded = decoded.replace("\\u0026", "&")
-    decoded = decoded.replace("\\/", "/")
+    decoded = html.unescape(
+        page_html
+    )
+
+    decoded = decoded.replace(
+        "\\u002F",
+        "/",
+    )
+
+    decoded = decoded.replace(
+        "\\u0026",
+        "&",
+    )
+
+    decoded = decoded.replace(
+        "\\/",
+        "/",
+    )
 
     patterns = [
         r'"playAddr"\s*:\s*"([^"]+)"',
@@ -236,42 +299,86 @@ def _extract_tiktok_video_urls_from_html(
             flags=re.IGNORECASE,
         ):
             candidate = (
-                match.replace("\\u002F", "/")
+                match
+                .replace("\\u002F", "/")
                 .replace("\\u0026", "&")
                 .replace("\\/", "/")
             )
 
-            if candidate.startswith("http"):
-                found.append(candidate)
+            if candidate.startswith(
+                "http"
+            ):
+                found.append(
+                    candidate
+                )
 
-    return list(dict.fromkeys(found))
+    return list(
+        dict.fromkeys(
+            found
+        )
+    )
 
 
-def _looks_like_mp4(path: Path) -> bool:
+def _looks_like_mp4(
+    path: Path,
+) -> bool:
     try:
-        with path.open("rb") as file:
-            header = file.read(64)
+        with path.open(
+            "rb"
+        ) as file:
+            header = file.read(
+                64
+            )
+
     except OSError:
         return False
 
     return b"ftyp" in header
 
 
-def _is_playable_video(path: Path) -> bool:
-    if (
-        not path.exists()
-        or not path.is_file()
-        or path.stat().st_size < 100_000
+def _validate_video(
+    path: Path,
+) -> tuple[bool, str]:
+    if not path.exists():
+        return (
+            False,
+            "файл не существует",
+        )
+
+    if not path.is_file():
+        return (
+            False,
+            "путь не является файлом",
+        )
+
+    size = (
+        path.stat().st_size
+    )
+
+    if size < 100_000:
+        return (
+            False,
+            "слишком маленький файл: "
+            f"{size} bytes",
+        )
+
+    if not _looks_like_mp4(
+        path
     ):
-        return False
+        return (
+            False,
+            "в заголовке файла "
+            "нет MP4-сигнатуры ftyp",
+        )
 
-    if not _looks_like_mp4(path):
-        return False
-
-    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    ffmpeg = (
+        imageio_ffmpeg
+        .get_ffmpeg_exe()
+    )
 
     command = [
         ffmpeg,
+        "-hide_banner",
         "-v",
         "error",
         "-i",
@@ -294,21 +401,41 @@ def _is_playable_video(path: Path) -> bool:
             timeout=30,
             check=False,
         )
-    except (
-        OSError,
-        subprocess.TimeoutExpired,
-    ):
-        return False
+
+    except OSError as error:
+        return (
+            False,
+            "ffmpeg не запустился: "
+            f"{type(error).__name__}: "
+            f"{error}",
+        )
+
+    except subprocess.TimeoutExpired:
+        return (
+            False,
+            "ffmpeg не завершил "
+            "проверку за 30 секунд",
+        )
 
     if result.returncode != 0:
-        print(
-            "TIKTOK VALIDATE: ffmpeg отклонил "
-            f"{path.name}: {result.stderr[-500:]}",
-            flush=True,
+        ffmpeg_error = (
+            result.stderr.strip()
+            or (
+                "ffmpeg return code "
+                f"{result.returncode}"
+            )
         )
-        return False
 
-    return True
+        return (
+            False,
+            "ffmpeg отклонил видео: "
+            f"{ffmpeg_error[-1200:]}",
+        )
+
+    return (
+        True,
+        "ok",
+    )
 
 
 def _download_tiktok_direct(
@@ -319,7 +446,24 @@ def _download_tiktok_direct(
         None,
     ],
 ) -> Path:
-    resolved_url = resolve_tiktok_url(url)
+    resolved_url = (
+        resolve_tiktok_url(
+            url
+        )
+    )
+
+    print(
+        "TIKTOK DIRECT PAGE: "
+        f"source={_safe_url(url)}",
+        flush=True,
+    )
+
+    print(
+        "TIKTOK DIRECT PAGE: "
+        f"resolved="
+        f"{_safe_url(resolved_url)}",
+        flush=True,
+    )
 
     timeout = httpx.Timeout(
         connect=20.0,
@@ -333,17 +477,38 @@ def _download_tiktok_direct(
         follow_redirects=True,
         timeout=timeout,
     ) as client:
-        response = client.get(resolved_url)
+        response = client.get(
+            resolved_url
+        )
+
         response.raise_for_status()
 
-        final_url = str(response.url)
-        page_html = response.text
+        final_url = str(
+            response.url
+        )
+
+        page_html = (
+            response.text
+        )
+
+    print(
+        "TIKTOK DIRECT PAGE: "
+        f"final={_safe_url(final_url)} | "
+        f"status={response.status_code} | "
+        "content-type="
+        f"{response.headers.get('content-type', '')}",
+        flush=True,
+    )
 
     video_urls: list[str] = []
 
-    for data in extract_json_objects(page_html):
+    for data in extract_json_objects(
+        page_html
+    ):
         video_urls.extend(
-            _extract_tiktok_video_urls_from_data(data)
+            _extract_tiktok_video_urls_from_data(
+                data
+            )
         )
 
     video_urls.extend(
@@ -353,16 +518,21 @@ def _download_tiktok_direct(
     )
 
     video_urls = list(
-        dict.fromkeys(video_urls)
+        dict.fromkeys(
+            video_urls
+        )
     )
 
     if not video_urls:
         raise RuntimeError(
-            "TikTok не отдал прямой адрес видео"
+            "TikTok не отдал "
+            "прямой адрес видео"
         )
 
     print(
-        f"TIKTOK DIRECT: найдено URL: {len(video_urls)}",
+        "TIKTOK DIRECT: "
+        "найдено кандидатов: "
+        f"{len(video_urls)}",
         flush=True,
     )
 
@@ -371,8 +541,13 @@ def _download_tiktok_direct(
         "Referer": final_url,
     }
 
-    valid_candidates: list[Path] = []
-    last_error: Exception | None = None
+    valid_candidates: list[
+        Path
+    ] = []
+
+    last_error: (
+        Exception | None
+    ) = None
 
     with httpx.Client(
         headers=headers,
@@ -390,85 +565,173 @@ def _download_tiktok_direct(
         ):
             path = (
                 folder_path
-                / f"tiktok-direct-{index}.mp4"
+                / (
+                    "tiktok-direct-"
+                    f"{index}.mp4"
+                )
             )
 
             try:
+                print(
+                    "\n---------- "
+                    "TIKTOK CANDIDATE "
+                    f"{index}/"
+                    f"{len(video_urls)} "
+                    "----------",
+                    flush=True,
+                )
+
+                print(
+                    "request="
+                    f"{_safe_url(video_url)}",
+                    flush=True,
+                )
+
                 with client.stream(
                     "GET",
                     video_url,
                 ) as media_response:
                     media_response.raise_for_status()
 
+                    response_final_url = str(
+                        media_response.url
+                    )
+
                     content_type = (
-                        media_response.headers.get(
+                        media_response
+                        .headers
+                        .get(
                             "content-type",
                             "",
                         )
-                        .split(";", 1)[0]
+                        .split(
+                            ";",
+                            1,
+                        )[0]
                         .strip()
                         .lower()
                     )
 
-                    if content_type.startswith(
-                        ("text/", "application/json")
-                    ):
+                    content_length_raw = (
+                        media_response
+                        .headers
+                        .get(
+                            "content-length",
+                            "",
+                        )
+                    )
+
+                    content_range = (
+                        media_response
+                        .headers
+                        .get(
+                            "content-range",
+                            "",
+                        )
+                    )
+
+                    print(
+                        "status="
+                        f"{media_response.status_code}",
+                        flush=True,
+                    )
+
+                    print(
+                        "final="
+                        f"{_safe_url(response_final_url)}",
+                        flush=True,
+                    )
+
+                    print(
+                        "content-type="
+                        f"{content_type or 'unknown'}",
+                        flush=True,
+                    )
+
+                    print(
+                        "content-length="
+                        f"{content_length_raw or 'unknown'}",
+                        flush=True,
+                    )
+
+                    if content_range:
                         print(
-                            "TIKTOK DIRECT: "
-                            f"кандидат {index} пропущен, "
-                            f"Content-Type={content_type}",
+                            "content-range="
+                            f"{content_range}",
                             flush=True,
                         )
+
+                    if content_type.startswith(
+                        (
+                            "text/",
+                            "application/json",
+                        )
+                    ):
+                        print(
+                            "result=REJECTED: "
+                            "сервер вернул "
+                            "текст/JSON",
+                            flush=True,
+                        )
+
                         continue
 
-                    total = int(
-                        media_response.headers.get(
-                            "content-length",
-                            "0",
+                    try:
+                        total = int(
+                            content_length_raw
+                            or 0
                         )
-                        or 0
-                    )
+
+                    except ValueError:
+                        total = 0
 
                     if (
                         total
-                        and total > TELEGRAM_SAFE_SIZE
+                        and total
+                        > TELEGRAM_SAFE_SIZE
                     ):
                         print(
-                            "TIKTOK DIRECT: "
-                            f"кандидат {index} больше 48 МБ, "
-                            "пропускаю",
+                            "result=REJECTED: "
+                            "кандидат больше "
+                            "48 МБ",
                             flush=True,
                         )
+
                         continue
 
                     downloaded = 0
 
-                    with path.open("wb") as file:
+                    with path.open(
+                        "wb"
+                    ) as file:
                         for chunk in (
-                            media_response.iter_bytes(
-                                chunk_size=256 * 1024
+                            media_response
+                            .iter_bytes(
+                                chunk_size=(
+                                    256
+                                    * 1024
+                                )
                             )
                         ):
                             if not chunk:
                                 continue
 
-                            file.write(chunk)
-                            downloaded += len(chunk)
+                            file.write(
+                                chunk
+                            )
 
-                            if downloaded > TELEGRAM_SAFE_SIZE:
+                            downloaded += (
+                                len(chunk)
+                            )
+
+                            if (
+                                downloaded
+                                > TELEGRAM_SAFE_SIZE
+                            ):
                                 raise RuntimeError(
                                     "Кандидат TikTok "
                                     "превысил 48 МБ"
                                 )
-
-                            progress_hook(
-                                {
-                                    "status": "downloading",
-                                    "downloaded_bytes": downloaded,
-                                    "total_bytes": total or None,
-                                    "filename": str(path),
-                                }
-                            )
 
                 size = (
                     path.stat().st_size
@@ -477,30 +740,40 @@ def _download_tiktok_direct(
                 )
 
                 print(
-                    "TIKTOK DIRECT: "
-                    f"кандидат {index}, "
-                    f"Content-Type={content_type or 'unknown'}, "
-                    f"size={size}",
+                    "downloaded-bytes="
+                    f"{size}",
                     flush=True,
                 )
 
-                if not _is_playable_video(path):
-                    print(
-                        "TIKTOK DIRECT: "
-                        f"кандидат {index} не является "
-                        "воспроизводимым MP4",
-                        flush=True,
-                    )
-                    path.unlink(missing_ok=True)
-                    continue
+                (
+                    valid,
+                    validation_reason,
+                ) = _validate_video(
+                    path
+                )
 
                 print(
-                    "TIKTOK DIRECT: "
-                    f"кандидат {index} валидный",
+                    "validation="
+                    f"{'VALID' if valid else 'INVALID'}",
                     flush=True,
                 )
 
-                valid_candidates.append(path)
+                print(
+                    "validation-reason="
+                    f"{validation_reason}",
+                    flush=True,
+                )
+
+                if not valid:
+                    path.unlink(
+                        missing_ok=True
+                    )
+
+                    continue
+
+                valid_candidates.append(
+                    path
+                )
 
             except (
                 httpx.HTTPError,
@@ -508,44 +781,79 @@ def _download_tiktok_direct(
                 RuntimeError,
             ) as error:
                 last_error = error
-                path.unlink(missing_ok=True)
+
+                path.unlink(
+                    missing_ok=True
+                )
 
                 print(
-                    "TIKTOK DIRECT: "
-                    f"кандидат {index} отклонён — "
-                    f"{type(error).__name__}: {error}",
+                    "result=ERROR: "
+                    f"{type(error).__name__}: "
+                    f"{error}",
                     flush=True,
                 )
 
     if not valid_candidates:
         raise RuntimeError(
-            "TikTok не отдал ни одного "
-            "воспроизводимого видеофайла"
+            "TikTok не отдал "
+            "ни одного воспроизводимого "
+            "видеофайла"
         ) from last_error
 
     best_path = max(
         valid_candidates,
-        key=lambda item: item.stat().st_size,
+        key=lambda item: (
+            item.stat().st_size
+        ),
     )
 
-    for candidate in valid_candidates:
+    for candidate in (
+        valid_candidates
+    ):
         if candidate != best_path:
-            candidate.unlink(missing_ok=True)
+            candidate.unlink(
+                missing_ok=True
+            )
 
-    progress_hook(
-        {
-            "status": "finished",
-            "downloaded_bytes": best_path.stat().st_size,
-            "total_bytes": best_path.stat().st_size,
-            "filename": str(best_path),
-        }
+    best_size = (
+        best_path.stat().st_size
     )
 
     print(
-        "TIKTOK DIRECT: выбран лучший файл — "
-        f"{best_path.name}, "
-        f"{best_path.stat().st_size} bytes",
+        "\n========== "
+        "TIKTOK DIRECT RESULT "
+        "==========",
         flush=True,
+    )
+
+    print(
+        f"selected={best_path.name}",
+        flush=True,
+    )
+
+    print(
+        f"size={best_size} bytes",
+        flush=True,
+    )
+
+    print(
+        "================================"
+        "==========\n",
+        flush=True,
+    )
+
+    # Прогресс отправляем только
+    # после того, как файл уже
+    # действительно прошёл проверку.
+    progress_hook(
+        {
+            "status": "finished",
+            "downloaded_bytes": best_size,
+            "total_bytes": best_size,
+            "filename": str(
+                best_path
+            ),
+        }
     )
 
     return best_path
@@ -559,62 +867,108 @@ def download_video_with_progress(
         None,
     ],
 ) -> Path:
-    folder_path = Path(folder)
+    folder_path = Path(
+        folder
+    )
 
     folder_path.mkdir(
         parents=True,
         exist_ok=True,
     )
 
-    platform, platform_options = (
-        get_platform_options(url)
+    (
+        platform,
+        platform_options,
+    ) = get_platform_options(
+        url
     )
 
     print(
-        f"IRISSAVE PLATFORM: {platform}",
+        "IRISSAVE PLATFORM: "
+        f"{platform}",
         flush=True,
     )
 
     if platform == "TIKTOK":
         try:
             print(
-                "TIKTOK DIRECT: пробую прямой способ",
+                "TIKTOK DIRECT: "
+                "ищу и проверяю "
+                "видеопотоки",
                 flush=True,
             )
 
-            direct_path = _download_tiktok_direct(
-                url=url,
-                folder_path=folder_path,
-                progress_hook=progress_hook,
+            direct_path = (
+                _download_tiktok_direct(
+                    url=url,
+                    folder_path=folder_path,
+                    progress_hook=progress_hook,
+                )
             )
 
             return direct_path
 
         except Exception as direct_error:
             print(
-                "TIKTOK DIRECT: не сработал — "
+                "\n========== "
+                "TIKTOK DIRECT FAILED "
+                "==========",
+                flush=True,
+            )
+
+            print(
                 f"{type(direct_error).__name__}: "
                 f"{direct_error}",
                 flush=True,
             )
 
+            cause = (
+                direct_error.__cause__
+                or direct_error.__context__
+            )
+
+            if cause is not None:
+                print(
+                    "Cause: "
+                    f"{type(cause).__name__}: "
+                    f"{cause}",
+                    flush=True,
+                )
+
             print(
-                "TIKTOK FALLBACK: запускаю yt-dlp",
+                "================================"
+                "==========\n",
+                flush=True,
+            )
+
+            print(
+                "TIKTOK FALLBACK: "
+                "запускаю yt-dlp",
                 flush=True,
             )
 
     template = os.path.join(
         folder,
-        "diagnostic-%(title).70s-%(id)s.%(ext)s",
+        (
+            "diagnostic-"
+            "%(title).70s-"
+            "%(id)s."
+            "%(ext)s"
+        ),
     )
 
     files_before = {
         file.resolve()
-        for file in folder_path.iterdir()
+        for file in (
+            folder_path.iterdir()
+        )
         if file.is_file()
     }
 
-    options: dict[str, Any] = {
+    options: dict[
+        str,
+        Any,
+    ] = {
         "outtmpl": template,
         "noplaylist": True,
         "quiet": True,
@@ -628,7 +982,9 @@ def download_video_with_progress(
         "progress_hooks": [
             progress_hook,
         ],
-        "http_headers": BROWSER_HEADERS,
+        "http_headers": (
+            BROWSER_HEADERS
+        ),
     }
 
     options.update(
@@ -639,13 +995,17 @@ def download_video_with_progress(
         with yt_dlp.YoutubeDL(
             options
         ) as downloader:
-            info = downloader.extract_info(
-                url,
-                download=True,
+            info = (
+                downloader.extract_info(
+                    url,
+                    download=True,
+                )
             )
 
             print(
-                "\n========== FILES AFTER YT-DLP ==========",
+                "\n========== "
+                "FILES AFTER YT-DLP "
+                "==========",
                 flush=True,
             )
 
@@ -654,41 +1014,56 @@ def download_video_with_progress(
             ):
                 if file_path.is_file():
                     print(
-                        f"FILE: {file_path.name} | "
-                        f"SIZE: "
-                        f"{file_path.stat().st_size} bytes",
+                        "FILE: "
+                        f"{file_path.name} | "
+                        "SIZE: "
+                        f"{file_path.stat().st_size} "
+                        "bytes",
                         flush=True,
                     )
 
             print(
-                "========================================\n",
+                "================================"
+                "========\n",
                 flush=True,
             )
 
-            if not isinstance(info, dict):
+            if not isinstance(
+                info,
+                dict,
+            ):
                 raise RuntimeError(
-                    "yt-dlp не вернул информацию о видео"
+                    "yt-dlp не вернул "
+                    "информацию о видео"
                 )
 
             prepared_path = Path(
-                downloader.prepare_filename(info)
+                downloader.prepare_filename(
+                    info
+                )
             )
 
-    except yt_dlp.utils.DownloadError as error:
+    except (
+        yt_dlp.utils.DownloadError
+    ) as error:
         if platform == "TIKTOK":
             raise RuntimeError(
-                "TikTok временно не отдал видео "
-                "ни прямым способом, ни через yt-dlp"
+                "TikTok временно "
+                "не отдал видео "
+                "ни прямым способом, "
+                "ни через yt-dlp"
             ) from error
 
         raise RuntimeError(
             str(error)
         ) from error
 
-    video_path = _find_downloaded_video(
-        folder_path=folder_path,
-        prepared_path=prepared_path,
-        files_before=files_before,
+    video_path = (
+        _find_downloaded_video(
+            folder_path=folder_path,
+            prepared_path=prepared_path,
+            files_before=files_before,
+        )
     )
 
     _print_download_info(
@@ -702,7 +1077,8 @@ def download_video_with_progress(
         > TELEGRAM_SAFE_SIZE
     ):
         raise RuntimeError(
-            "Диагностический файл больше 48 МБ"
+            "Диагностический файл "
+            "больше 48 МБ"
         )
 
     return video_path
