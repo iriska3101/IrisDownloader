@@ -1,4 +1,5 @@
 import asyncio
+import re
 import subprocess
 from pathlib import Path
 
@@ -15,21 +16,109 @@ from utils.progress import DownloadProgress
 from utils.retry import run_with_retry
 
 
-def _normalize_instagram_video(video_path: Path) -> Path:
+def _probe_video_dimensions(video_path: Path) -> tuple[int | None, int | None]:
     """
-    Быстро нормализует Instagram-видео перед отправкой в Telegram.
+    Получает отображаемые размеры видео через ffmpeg.
 
-    Сначала исправляем SAR прямо в H.264 bitstream без перекодирования.
-    Это занимает секунды и не нагружает бесплатный Render.
-    Если поток не H.264 или быстрый способ не поддерживается,
-    используем обычное перекодирование как резервный вариант.
+    Telegram Bot API позволяет явно передать width/height. Это важно
+    для некоторых Instagram Reels, у которых контейнер/поток содержит
+    нестандартные SAR или rotation-метаданные: если оставить размеры на
+    автоопределение Telegram, клиент iOS может показать растянутую картинку.
+    """
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    command = [
+        ffmpeg,
+        "-hide_banner",
+        "-i",
+        str(video_path),
+    ]
+
+    try:
+        result = subprocess.run(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print(
+            "VIDEO PROBE: не удалось получить размеры | "
+            f"{type(error).__name__}: {error}",
+            flush=True,
+        )
+        return None, None
+
+    stderr = result.stderr or ""
+
+    match = re.search(
+        r"Video:.*?(\d{2,5})x(\d{2,5})"
+        r"(?:\s+\[SAR\s+(\d+):(\d+)\s+DAR\s+(\d+):(\d+)\])?",
+        stderr,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    if not match:
+        print(
+            "VIDEO PROBE: строка размеров не найдена",
+            flush=True,
+        )
+        return None, None
+
+    width = int(match.group(1))
+    height = int(match.group(2))
+    sar_num = int(match.group(3) or 1)
+    sar_den = int(match.group(4) or 1)
+
+    if sar_den <= 0:
+        sar_den = 1
+
+    display_width = max(1, round(width * sar_num / sar_den))
+    display_height = height
+
+    rotation_match = re.search(
+        r"rotation\s+of\s+(-?\d+(?:\.\d+)?)\s+degrees",
+        stderr,
+        flags=re.IGNORECASE,
+    )
+
+    rotation = 0
+    if rotation_match:
+        try:
+            rotation = round(float(rotation_match.group(1))) % 360
+        except ValueError:
+            rotation = 0
+
+    if rotation in {90, 270}:
+        display_width, display_height = display_height, display_width
+
+    print(
+        "VIDEO PROBE: "
+        f"coded={width}x{height} | "
+        f"SAR={sar_num}:{sar_den} | "
+        f"rotation={rotation} | "
+        f"telegram={display_width}x{display_height}",
+        flush=True,
+    )
+
+    return display_width, display_height
+
+
+def _prepare_instagram_video(video_path: Path) -> Path:
+    """
+    Быстро перепаковывает Instagram-видео без перекодирования.
+
+    Видеопоток и звук не пережимаются. Для H.264 дополнительно просим
+    ffmpeg записать квадратный SAR. Если фильтр не поддерживается,
+    оставляем исходный файл — длительного CPU-перекодирования больше нет.
     """
     ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
     output_path = video_path.with_name(
         f"{video_path.stem}-telegram.mp4"
     )
 
-    fast_command = [
+    command = [
         ffmpeg,
         "-hide_banner",
         "-loglevel",
@@ -51,111 +140,47 @@ def _normalize_instagram_video(video_path: Path) -> Path:
     ]
 
     print(
-        "INSTAGRAM NORMALIZE: быстрый SAR fix без перекодирования",
+        "INSTAGRAM PREPARE: быстрый remux без перекодирования",
         flush=True,
     )
 
     try:
-        fast_result = subprocess.run(
-            fast_command,
+        result = subprocess.run(
+            command,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
             timeout=45,
             check=False,
         )
-    except subprocess.TimeoutExpired:
-        fast_result = None
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print(
+            "INSTAGRAM PREPARE: remux пропущен | "
+            f"{type(error).__name__}: {error}",
+            flush=True,
+        )
+        output_path.unlink(missing_ok=True)
+        return video_path
 
     if (
-        fast_result is not None
-        and fast_result.returncode == 0
+        result.returncode == 0
         and output_path.exists()
         and output_path.stat().st_size > 0
     ):
         print(
-            "INSTAGRAM NORMALIZE: быстрый SAR fix готов | "
+            "INSTAGRAM PREPARE: remux готов | "
             f"size={output_path.stat().st_size}",
             flush=True,
         )
         return output_path
 
     output_path.unlink(missing_ok=True)
-
-    if fast_result is not None and fast_result.stderr.strip():
-        print(
-            "INSTAGRAM NORMALIZE: быстрый способ не подошёл | "
-            f"{fast_result.stderr.strip()[-600:]}",
-            flush=True,
-        )
-
-    fallback_command = [
-        ffmpeg,
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-y",
-        "-i",
-        str(video_path),
-        "-map",
-        "0:v:0",
-        "-map",
-        "0:a:0?",
-        "-vf",
-        "setsar=1",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "ultrafast",
-        "-crf",
-        "21",
-        "-pix_fmt",
-        "yuv420p",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "160k",
-        "-movflags",
-        "+faststart",
-        str(output_path),
-    ]
-
     print(
-        "INSTAGRAM NORMALIZE: fallback-перекодирование",
+        "INSTAGRAM PREPARE: использую исходный файл | "
+        f"{result.stderr.strip()[-600:]}",
         flush=True,
     )
-
-    result = subprocess.run(
-        fallback_command,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=180,
-        check=False,
-    )
-
-    if result.returncode != 0:
-        output_path.unlink(missing_ok=True)
-        raise RuntimeError(
-            "Не удалось нормализовать Instagram-видео: "
-            f"{result.stderr.strip()[-1200:]}"
-        )
-
-    if (
-        not output_path.exists()
-        or output_path.stat().st_size <= 0
-    ):
-        raise RuntimeError(
-            "После нормализации Instagram-видео файл не создан"
-        )
-
-    print(
-        "INSTAGRAM NORMALIZE: fallback готов | "
-        f"size={output_path.stat().st_size}",
-        flush=True,
-    )
-
-    return output_path
+    return video_path
 
 
 async def process_video_download(
@@ -280,9 +305,14 @@ async def process_video_download(
             "⚙️ Подготавливаю видео…"
         )
         video_path = await asyncio.to_thread(
-            _normalize_instagram_video,
+            _prepare_instagram_video,
             video_path,
         )
+
+    video_width, video_height = await asyncio.to_thread(
+        _probe_video_dimensions,
+        video_path,
+    )
 
     print(
         "VIDEO HANDLER: меняю сообщение на «Отправляю»",
@@ -307,6 +337,8 @@ async def process_video_download(
                     filename=video_path.name,
                     caption="⬇️ Скачано через IriSSave",
                     supports_streaming=True,
+                    width=video_width,
+                    height=video_height,
                     write_timeout=300,
                     read_timeout=300,
                     connect_timeout=60,
