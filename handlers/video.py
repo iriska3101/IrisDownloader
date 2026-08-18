@@ -7,7 +7,6 @@ import imageio_ffmpeg
 from telegram import Message
 
 from services.tiktok_api_fallback import download_tiktok_via_tikwm
-from services.youtube_piped_fallback import download_youtube_via_piped
 from services.video_progress import download_video_with_progress
 from utils.progress import DownloadProgress
 from utils.retry import run_with_retry
@@ -201,7 +200,7 @@ async def process_video_download(message: Message, url: str, folder: str) -> Non
 
             elif is_youtube:
                 print(
-                    "VIDEO HANDLER: основной YouTube downloader не сработал — запускаю Piped fallback",
+                    "VIDEO HANDLER: YouTube заблокировал анонимную сессию",
                     flush=True,
                 )
                 print(
@@ -209,25 +208,10 @@ async def process_video_download(message: Message, url: str, folder: str) -> Non
                     f"{type(primary_error).__name__}: {primary_error}",
                     flush=True,
                 )
-                await message.edit_text(
-                    "⬇️ IriSSave\n\n🔄 YouTube ограничил доступ. Пробую резервный способ…"
-                )
-                try:
-                    video_path = await asyncio.to_thread(
-                        download_youtube_via_piped,
-                        url,
-                        folder,
-                        progress.hook,
-                    )
-                except Exception as fallback_error:
-                    print(
-                        "VIDEO HANDLER: Piped fallback тоже не сработал: "
-                        f"{type(fallback_error).__name__}: {fallback_error}",
-                        flush=True,
-                    )
-                    raise RuntimeError(
-                        "YouTube не удалось скачать ни основным способом, ни через резервный Piped"
-                    ) from fallback_error
+                raise RuntimeError(
+                    "YouTube требует авторизованную сессию. "
+                    "Нужно настроить cookies для IriSSave."
+                ) from primary_error
             else:
                 raise
 
