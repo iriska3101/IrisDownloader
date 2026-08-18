@@ -47,9 +47,14 @@ async def show_link_menu(
         reply_markup=keyboard,
     )
 
-    context.user_data[
-        f"url_{message.message_id}"
-    ] = url
+    key = f"url_{message.message_id}"
+
+    # В группе кнопки может нажать любой участник, поэтому ссылка
+    # хранится на уровне чата. В личке сохраняем прежнее поведение.
+    if update.message.chat.type in ("group", "supergroup"):
+        context.chat_data[key] = url
+    else:
+        context.user_data[key] = url
 
 
 async def search_music(
@@ -158,6 +163,11 @@ async def handle_text(
             context,
             url,
         )
+        return
+
+    # В группах IriSSave не вмешивается в обычную переписку.
+    # Он реагирует только на сообщения, содержащие ссылку.
+    if update.message.chat.type in ("group", "supergroup"):
         return
 
     if len(text) < 2:
