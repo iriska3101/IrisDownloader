@@ -9,6 +9,9 @@ from telegram import Message
 from services.tiktok_api_fallback import (
     download_tiktok_via_tikwm,
 )
+from services.youtube_piped_fallback import (
+    download_youtube_via_piped,
+)
 from services.video_progress import (
     download_video_with_progress,
 )
@@ -17,14 +20,6 @@ from utils.retry import run_with_retry
 
 
 def _probe_video_dimensions(video_path: Path) -> tuple[int | None, int | None]:
-    """
-    Получает отображаемые размеры видео через ffmpeg.
-
-    Telegram Bot API позволяет явно передать width/height. Это важно
-    для некоторых Instagram Reels, у которых контейнер/поток содержит
-    нестандартные SAR или rotation-метаданные: если оставить размеры на
-    автоопределение Telegram, клиент iOS может показать растянутую картинку.
-    """
     ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
     command = [
         ffmpeg,
@@ -106,13 +101,6 @@ def _probe_video_dimensions(video_path: Path) -> tuple[int | None, int | None]:
 
 
 def _prepare_instagram_video(video_path: Path) -> Path:
-    """
-    Быстро перепаковывает Instagram-видео без перекодирования.
-
-    Видеопоток и звук не пережимаются. Для H.264 дополнительно просим
-    ffmpeg записать квадратный SAR. Если фильтр не поддерживается,
-    оставляем исходный файл — длительного CPU-перекодирования больше нет.
-    """
     ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
     output_path = video_path.with_name(
         f"{video_path.stem}-telegram.mp4"
@@ -188,12 +176,6 @@ async def process_video_download(
     url: str,
     folder: str,
 ) -> None:
-    """
-    Скачивает видео и отправляет его в Telegram как обычное видео.
-
-    Для TikTok, если прямой способ и yt-dlp не сработали,
-    пробует отдельный резервный TikWM API.
-    """
     progress = DownloadProgress(
         message=message,
         title=(
@@ -214,6 +196,13 @@ async def process_video_download(
         flush=True,
     )
 
+    lowered_url = url.lower()
+    is_tiktok = "tiktok.com" in lowered_url
+    is_youtube = (
+        "youtube.com" in lowered_url
+        or "youtu.be" in lowered_url
+    )
+
     try:
         try:
             video_path = await run_with_retry(
@@ -225,39 +214,68 @@ async def process_video_download(
             )
 
         except Exception as primary_error:
-            if "tiktok.com" not in url.lower():
-                raise
-
-            print(
-                "VIDEO HANDLER: основной TikTok downloader не сработал — "
-                "запускаю TikWM fallback",
-                flush=True,
-            )
-            print(
-                "VIDEO HANDLER: primary error: "
-                f"{type(primary_error).__name__}: {primary_error}",
-                flush=True,
-            )
-
-            try:
-                video_path = await asyncio.to_thread(
-                    download_tiktok_via_tikwm,
-                    url,
-                    folder,
-                    progress.hook,
-                )
-
-            except Exception as fallback_error:
+            if is_tiktok:
                 print(
-                    "VIDEO HANDLER: TikWM fallback тоже не сработал: "
-                    f"{type(fallback_error).__name__}: {fallback_error}",
+                    "VIDEO HANDLER: основной TikTok downloader не сработал — "
+                    "запускаю TikWM fallback",
+                    flush=True,
+                )
+                print(
+                    "VIDEO HANDLER: primary error: "
+                    f"{type(primary_error).__name__}: {primary_error}",
                     flush=True,
                 )
 
-                raise RuntimeError(
-                    "TikTok не удалось скачать ни основным способом, "
-                    "ни через резервный TikWM"
-                ) from fallback_error
+                try:
+                    video_path = await asyncio.to_thread(
+                        download_tiktok_via_tikwm,
+                        url,
+                        folder,
+                        progress.hook,
+                    )
+                except Exception as fallback_error:
+                    print(
+                        "VIDEO HANDLER: TikWM fallback тоже не сработал: "
+                        f"{type(fallback_error).__name__}: {fallback_error}",
+                        flush=True,
+                    )
+                    raise RuntimeError(
+                        "TikTok не удалось скачать ни основным способом, "
+                        "ни через резервный TikWM"
+                    ) from fallback_error
+
+            elif is_youtube:
+                print(
+                    "VIDEO HANDLER: основной YouTube downloader не сработал — "
+                    "запускаю Piped fallback",
+                    flush=True,
+                )
+                print(
+                    "VIDEO HANDLER: primary error: "
+                    f"{type(primary_error).__name__}: {primary_error}",
+                    flush=True,
+                )
+
+                try:
+                    video_path = await asyncio.to_thread(
+                        download_youtube_via_piped,
+                        url,
+                        folder,
+                        progress.hook,
+                    )
+                except Exception as fallback_error:
+                    print(
+                        "VIDEO HANDLER: Piped fallback тоже не сработал: "
+                        f"{type(fallback_error).__name__}: {fallback_error}",
+                        flush=True,
+                    )
+                    raise RuntimeError(
+                        "YouTube не удалось скачать ни основным способом, "
+                        "ни через резервный Piped"
+                    ) from fallback_error
+
+            else:
+                raise
 
         print(
             f"VIDEO HANDLER: загрузка завершена — {video_path}",
@@ -299,7 +317,7 @@ async def process_video_download(
             "Скачанный видеофайл не найден"
         )
 
-    if "instagram.com" in url.lower():
+    if "instagram.com" in lowered_url:
         await message.edit_text(
             "⬇️ IriSSave\n\n"
             "⚙️ Подготавливаю видео…"
