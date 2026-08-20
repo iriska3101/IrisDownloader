@@ -1,15 +1,17 @@
 {
-  "generated_at": "2026-08-18T19:31:47+00:00",
+  "generated_at": "2026-08-20T14:59:26+00:00",
   "service": "IriSSave",
   "status": "error",
-  "error": "TimedOut: Timed out\n\nВнутренняя причина:\nReadTimeout: ReadTimeout('')",
+  "error": "RuntimeError: Эта платформа пока не поддерживает фотографии.",
   "lines": [
-    "2026-08-18T18:59:57+00:00 IRISSAVE [MEDIA_ID]: capture enabled",
-    "2026-08-18T18:59:58+00:00 YOUTUBE POT WARMUP: начинаю фоновую подготовку",
-    "2026-08-18T18:59:58+00:00 YOUTUBE POT: устанавливаю BgUtils provider",
-    "2026-08-18T18:59:58+00:00 IRISSAVE [MEDIA_ID]: /debug/logs and /debug/status attached",
-    "2026-08-18T19:00:00+00:00 YOUTUBE POT: git: tdlp-pot-provider'...",
-    "2026-08-18T19:02:01+00:00 YOUTUBE POT: BgUtils provider готов",
-    "2026-08-18T19:02:01+00:00 YOUTUBE POT WARMUP: готов"
+    "2026-08-20T14:45:24+00:00 IRISSAVE [MEDIA_ID]: capture enabled",
+    "2026-08-20T14:45:26+00:00 YOUTUBE POT WARMUP: начинаю фоновую подготовку",
+    "2026-08-20T14:45:26+00:00 YOUTUBE POT: устанавливаю BgUtils provider",
+    "2026-08-20T14:45:26+00:00 IRISSAVE [MEDIA_ID]: /debug/logs and /debug/status attached",
+    "2026-08-20T14:45:28+00:00 YOUTUBE POT: git: tdlp-pot-provider'...",
+    "2026-08-20T14:46:13+00:00 ERROR: [TikTok] [MEDIA_ID]: Unexpected response from webpage request; please report this issue on  [URL] , filling out the [MEDIA_ID] issue template. Confirm you are on the latest version using  yt-dlp -U",
+    "2026-08-20T14:47:31+00:00 YOUTUBE POT: BgUtils provider готов",
+    "2026-08-20T14:47:31+00:00 YOUTUBE POT WARMUP: готов",
+    "2026-08-20T14:59:25+00:00 RuntimeError: Эта платформа пока не поддерживает фотографии."
   ]
 }
