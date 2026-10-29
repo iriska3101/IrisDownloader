@@ -1,17 +1,21 @@
 {
-  "generated_at": "2026-08-20T14:59:26+00:00",
+  "generated_at": "2026-10-29T02:18:50+00:00",
   "service": "IriSSave",
   "status": "error",
-  "error": "RuntimeError: Эта платформа пока не поддерживает фотографии.",
+  "error": "NoSupportingHandlers: Unable to handle request: Unsupported url scheme: \"barcelona\" (requests, urllib, websockets, curl_cffi)",
   "lines": [
-    "2026-08-20T14:45:24+00:00 IRISSAVE [MEDIA_ID]: capture enabled",
-    "2026-08-20T14:45:26+00:00 YOUTUBE POT WARMUP: начинаю фоновую подготовку",
-    "2026-08-20T14:45:26+00:00 YOUTUBE POT: устанавливаю BgUtils provider",
-    "2026-08-20T14:45:26+00:00 IRISSAVE [MEDIA_ID]: /debug/logs and /debug/status attached",
-    "2026-08-20T14:45:28+00:00 YOUTUBE POT: git: tdlp-pot-provider'...",
-    "2026-08-20T14:46:13+00:00 ERROR: [TikTok] [MEDIA_ID]: Unexpected response from webpage request; please report this issue on  [URL] , filling out the [MEDIA_ID] issue template. Confirm you are on the latest version using  yt-dlp -U",
-    "2026-08-20T14:47:31+00:00 YOUTUBE POT: BgUtils provider готов",
-    "2026-08-20T14:47:31+00:00 YOUTUBE POT WARMUP: готов",
-    "2026-08-20T14:59:25+00:00 RuntimeError: Эта платформа пока не поддерживает фотографии."
+    "2026-10-29T02:16:21+00:00 IRISSAVE [MEDIA_ID]: capture enabled",
+    "2026-10-29T02:16:23+00:00 YOUTUBE POT WARMUP: начинаю фоновую подготовку",
+    "2026-10-29T02:16:23+00:00 YOUTUBE POT: устанавливаю BgUtils provider",
+    "2026-10-29T02:16:23+00:00 IRISSAVE [MEDIA_ID]: /debug/logs and /debug/status attached",
+    "2026-10-29T02:16:24+00:00 YOUTUBE POT: git: tdlp-pot-provider'...",
+    "2026-10-29T02:18:19+00:00 YOUTUBE POT: BgUtils provider готов",
+    "2026-10-29T02:18:19+00:00 YOUTUBE POT WARMUP: готов",
+    "2026-10-29T02:18:40+00:00 ERROR: [MEDIA_ID] URL: [URL]",
+    "2026-10-29T02:18:43+00:00 VIDEO HANDLER: запускаю прогресс",
+    "2026-10-29T02:18:43+00:00 VIDEO HANDLER: начинаю загрузку",
+    "2026-10-29T02:18:43+00:00 IRISSAVE PLATFORM: OTHER",
+    "2026-10-29T02:18:49+00:00 VIDEO HANDLER: останавливаю прогресс",
+    "2026-10-29T02:18:49+00:00 VIDEO HANDLER: прогресс остановлен"
   ]
 }
